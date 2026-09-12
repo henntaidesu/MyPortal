@@ -3,8 +3,12 @@ title Portal - http://localhost:9920
 cd /d "%~dp0"
 
 rem ============================================================
-rem  9920  门户前端（vite）
-rem  9921  认证中心（FastAPI），前端的 /api 和 /sso 都代理到它
+rem  9920  portal frontend (vite)
+rem  9921  auth server (FastAPI); the frontend proxies /api and /sso to it
+rem
+rem  ASCII ONLY in this file. cmd.exe parses .bat with the system ANSI codepage
+rem  (936 here), so UTF-8 Chinese gets mis-paired byte by byte and part of a
+rem  rem-line ends up being executed as a command. Keep comments and echo ASCII.
 rem ============================================================
 
 where node >nul 2>nul
@@ -43,7 +47,7 @@ if defined PID (
     exit /b 0
 )
 
-rem ---------- 前端依赖 ----------
+rem ---------- frontend dependencies ----------
 if not exist "webside\node_modules" (
     echo First run - installing frontend dependencies, please wait...
     pushd webside
@@ -57,8 +61,8 @@ if not exist "webside\node_modules" (
     popd
 )
 
-rem ---------- 后端依赖 ----------
-%PY% -c "import fastapi, uvicorn, httpx" >nul 2>nul
+rem ---------- backend dependencies ----------
+%PY% -c "import fastapi, uvicorn, httpx, pymysql" >nul 2>nul
 if errorlevel 1 (
     echo First run - installing backend dependencies, please wait...
     %PY% -m pip install -r backend\requirements.txt
@@ -69,25 +73,43 @@ if errorlevel 1 (
     )
 )
 
-rem ---------- 第一次要建账号 ----------
-if not exist "backend\data\sso.db" (
+rem ---------- first run: generate conf.ini, then let the user fill in MySQL ----------
+if not exist "backend\conf.ini" (
     echo.
-    echo   No account yet. Let's create the first one.
+    echo   First run - creating backend\conf.ini ...
     echo.
     pushd backend
     %PY% manage.py init
     popd
-    if not exist "backend\data\sso.db" (
-        echo [ERROR] Setup cancelled.
-        pause
-        exit /b 1
-    )
+    echo.
+    echo   [ACTION] Now edit backend\conf.ini, fill in your MySQL settings,
+    echo            then run start.bat again. The database and tables are
+    echo            created automatically on startup.
+    echo.
+    pause
+    exit /b 1
 )
 
-rem ---------- 起后端 ----------
+rem ---------- create tables + first account (skipped when they already exist) ----------
+pushd backend
+%PY% manage.py init
+set "INITRC=%ERRORLEVEL%"
+popd
+if not "%INITRC%"=="0" (
+    echo.
+    echo   [ERROR] Database is not ready. See the message above,
+    echo           then check [database] in backend\conf.ini.
+    echo.
+    pause
+    exit /b 1
+)
+
+rem ---------- start the backend ----------
+rem  /B keeps it inside THIS console instead of opening a second window:
+rem  both servers log here, and closing this window stops both of them.
 echo.
 echo   Starting auth server on port 9921...
-start "Portal SSO backend (9921)" /D "%~dp0backend" /MIN %PY% -m app.main
+start "" /D "%~dp0backend" /B %PY% -m app.main
 "%SystemRoot%\System32\ping.exe" -n 4 127.0.0.1 >nul
 
 set "BACKPID="
@@ -102,18 +124,18 @@ if not defined BACKPID (
     "%SystemRoot%\System32\ping.exe" -n 4 127.0.0.1 >nul
 )
 
-rem ---------- 起前端 ----------
+rem ---------- start the frontend ----------
 echo.
 echo   Portal:    http://localhost:9920
 echo   LAN:       see the Network address printed below
-echo   Close this window to stop both servers.
+echo   Both servers log into this window - close it to stop both.
 echo.
 
 pushd webside
 call npm run dev -- --open
 popd
 
-rem ---------- 前端退出后把后端也收掉 ----------
+rem ---------- frontend exited: shut the backend down too ----------
 echo.
 echo Stopping auth server...
 for /f "tokens=5" %%p in ('netstat -ano ^| findstr /r /c:"TCP .*:9921 .*LISTENING"') do taskkill /PID %%p /F >nul 2>nul

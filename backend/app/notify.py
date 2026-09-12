@@ -7,8 +7,7 @@ import asyncio
 
 import httpx
 
-from . import clients, db
-from .config import LOGOUT_NOTIFY_TIMEOUT
+from . import clients, db, settings
 from .security import new_token
 
 
@@ -30,5 +29,5 @@ async def broadcast_logout(sid: str) -> None:
                if (cfg := clients.get(cid)) and cfg['logout_uri']]
     if not targets:
         return
-    async with httpx.AsyncClient(timeout=LOGOUT_NOTIFY_TIMEOUT) as http:
+    async with httpx.AsyncClient(timeout=settings.logout_notify_timeout()) as http:
         await asyncio.gather(*(_post_one(http, cfg, sid) for cfg in targets))

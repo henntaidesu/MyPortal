@@ -1,0 +1,114 @@
+# -*- mode: python ; coding: utf-8 -*-
+"""PyInstaller spec —— 门户 Portal 认证中心（FastAPI + uvicorn，同端口提供接口和前端）。
+
+产物是单文件 Portal.exe，**带控制台**：uvicorn 的日志要看得见，
+`Portal.exe adduser` 这类子命令还要在控制台里交互输密码。
+
+两件和路径有关、改之前要想清楚的事（对应 backend/app/config.py 里的 FROZEN 分支）：
+
+1. 前端 webside/dist 打进 exe，运行时解压在 _MEIPASS/webside。
+   exe 同级放一个 webside 目录就能盖掉它，换前端不用重新打包。
+2. conf.ini 不打进来。它必须待在 exe 同级目录，打进去的话每次启动都会被
+   临时解压目录里的那份盖掉，改了密码等于白改。
+"""
+import os
+
+# 用 SPECPATH（PyInstaller 注入的 spec 文件所在目录）定位项目根，不要用 os.getcwd()——
+# 在哪个目录下调起来的就会算到哪儿去，表现成「前端悄悄没打进 exe」
+ROOT = os.path.abspath(globals().get('SPECPATH', os.getcwd()))
+BACKEND = os.path.join(ROOT, 'backend')
+
+datas = []
+binaries = []
+
+# 依赖清一色纯 Python，靠静态分析加 PyInstaller 自带的 hook 就够了。
+#
+# 特意**不用 collect_all**：它会把包里的可选子模块一并列成隐藏导入——
+# fastapi.testclient、starlette.testclient、pydantic.mypy、anyio.pytest_plugin 之类。
+# 在 anaconda base 这种什么都装了的环境里，它们会顺藤摸瓜把 pytest / mypy /
+# IPython / Jupyter / Qt 全拖进来，最后以一句
+# 「attempt to collect multiple Qt bindings packages」直接构建失败。
+hiddenimports = [
+    # uvicorn[standard] 的这几个实现是运行时按字符串名字导入的，静态分析看不见
+    'uvicorn.lifespan.on',
+    'uvicorn.lifespan.off',
+    'uvicorn.loops.auto',
+    'uvicorn.loops.asyncio',
+    'uvicorn.protocols.http.auto',
+    'uvicorn.protocols.http.h11_impl',
+    'uvicorn.protocols.http.httptools_impl',
+    'uvicorn.protocols.websockets.auto',
+    # 上面那几个 auto 会按「装没装」去探测这两个，探不到就退回纯 Python 实现
+    'httptools',
+    'websockets',
+
+    # 后端自己的模块。显式列出来而不是 collect_submodules('app')：后者打包时会
+    # 真的 import 一遍 app.config，而它读不到 conf.ini 就直接 sys.exit，
+    # 构建会挂在一句莫名其妙的「先去填数据库密码」上。
+    'app', 'app.main', 'app.config', 'app.db', 'app.settings', 'app.security',
+    'app.clients', 'app.deps', 'app.notify', 'app.icon',
+    'app.routers', 'app.routers.auth', 'app.routers.sso', 'app.routers.admin',
+    'manage',            # 无参起服务，带参走 manage.run()，见 backend/main.py
+]
+
+# 前端构建产物整体打入（onefile 运行时解压到 _MEIPASS/webside）
+WEBSIDE_DIST = os.path.join(ROOT, 'webside', 'dist')
+if os.path.isdir(WEBSIDE_DIST):
+    for _dp, _ds, _fs in os.walk(WEBSIDE_DIST):
+        _rel = os.path.relpath(_dp, WEBSIDE_DIST)
+        _dest = 'webside' if _rel == '.' else os.path.join('webside', _rel)
+        for _f in _fs:
+            datas.append((os.path.join(_dp, _f), _dest))
+    print('[portal.spec] 已打入前端 webside/dist -> webside')
+else:
+    # 直接失败，不能只警告：少了前端的 exe 一样能跑起来、一样能登录，
+    # 只是打开首页是一片「前端还没打包」，到现场才发现就晚了
+    raise SystemExit(f'[portal.spec] 没找到 {WEBSIDE_DIST}，先在 webside 目录执行 npm run build')
+
+
+a = Analysis(
+    [os.path.join(BACKEND, 'main.py')],
+    pathex=[BACKEND],
+    binaries=binaries,
+    datas=datas,
+    hiddenimports=hiddenimports,
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    # 这些一个都用不上。排掉不只是为了瘦身：在 anaconda base 里打包时，
+    # 只要有哪条边不小心连到 PyQt5 和 PySide6 两个 Qt 绑定，PyInstaller 会
+    # 直接中止构建（它不支持同时收集两个 Qt 绑定）
+    excludes=[
+        'PyQt5', 'PyQt6', 'PySide2', 'PySide6', 'tkinter',
+        'IPython', 'ipykernel', 'jupyter', 'notebook', 'nbformat', 'zmq',
+        'numpy', 'pandas', 'scipy', 'matplotlib', 'PIL',
+        'pytest', 'mypy', 'sphinx', 'docutils', 'black', 'yapf',
+        'jedi', 'parso', 'astroid', 'setuptools', 'pip',
+    ],
+    noarchive=False,
+    optimize=0,
+)
+
+pyz = PYZ(a.pure)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    a.binaries,
+    a.datas,
+    [],
+    name='Portal',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    runtime_tmpdir=None,
+    console=True,
+    icon=None,          # 仓库里没有 .ico，用 PyInstaller 默认图标
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+)

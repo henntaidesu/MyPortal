@@ -1,61 +1,56 @@
 """业务系统注册表。
 
-一个 client 就是一个「我自己写的系统」。改完 clients.json 不用重启，
-下次请求进来发现文件改了会自动重新加载。
+一个 client 就是一个「我自己写的系统」。注册表原来是 clients.json，现在在 MySQL 的
+clients 表里，用 manage.py addclient / delclient 维护。
+
+表里的 redirect_uris 是一行一个地址的纯文本，方便直接用客户端工具改；
+改完不用重启认证中心，下面这个 5 秒的缓存到期就会重新读。
 """
-import json
 import threading
+import time
 from typing import Any, Optional
 
-from .config import CLIENTS_PATH
+from . import db
 from .security import new_token
+
+# 每个请求都要查 client，加一层很短的缓存挡住数据库；
+# 代价是 manage.py 改完注册表，最多 5 秒后才在认证中心生效
+_CACHE_TTL = 5.0
 
 _lock = threading.Lock()
 _cache: dict[str, dict[str, Any]] = {}
-_mtime: float = -1.0
+_loaded_at: float = -1.0
 
-TEMPLATE = {
-    'demo': {
-        'name': '示例系统',
-        'secret': '请换成随机长字符串',
-        'redirect_uris': ['http://127.0.0.1:8801/sso/callback'],
-        'logout_uri': 'http://127.0.0.1:8801/sso/logout-notify',
+
+def _split_uris(raw: str) -> list[str]:
+    return [line.strip() for line in (raw or '').splitlines() if line.strip()]
+
+
+def _row_to_client(row: dict) -> dict[str, Any]:
+    return {
+        'client_id': row['client_id'],
+        'name': row['name'] or row['client_id'],
+        'secret': row['secret'] or '',
+        'redirect_uris': _split_uris(row['redirect_uris']),
+        'logout_uri': (row['logout_uri'] or '').strip(),
+        'home_url': (row['home_url'] or '').strip(),
     }
-}
-
-
-def _normalize(raw: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    out: dict[str, dict[str, Any]] = {}
-    for client_id, cfg in (raw or {}).items():
-        if not isinstance(cfg, dict):
-            continue
-        uris = cfg.get('redirect_uris') or ([cfg['redirect_uri']] if cfg.get('redirect_uri') else [])
-        out[str(client_id)] = {
-            'client_id': str(client_id),
-            'name': cfg.get('name') or str(client_id),
-            'secret': str(cfg.get('secret') or ''),
-            'redirect_uris': [str(u).strip() for u in uris if str(u).strip()],
-            'logout_uri': str(cfg.get('logout_uri') or '').strip(),
-            'home_url': str(cfg.get('home_url') or '').strip(),
-        }
-    return out
 
 
 def load(force: bool = False) -> dict[str, dict[str, Any]]:
-    global _cache, _mtime
+    global _cache, _loaded_at
     with _lock:
-        try:
-            mtime = CLIENTS_PATH.stat().st_mtime
-        except OSError:
-            _cache, _mtime = {}, -1.0
+        if not force and time.time() - _loaded_at < _CACHE_TTL:
             return _cache
-        if force or mtime != _mtime:
-            try:
-                _cache = _normalize(json.loads(CLIENTS_PATH.read_text(encoding='utf-8')))
-                _mtime = mtime
-            except (json.JSONDecodeError, OSError) as exc:
-                # 配置写坏了不要让已经在跑的服务崩掉，继续用上一版
-                print(f'[clients] {CLIENTS_PATH} 解析失败，沿用上一次的配置: {exc}')
+        try:
+            with db.connect() as conn:
+                rows = conn.execute('SELECT * FROM clients').fetchall()
+        except Exception as exc:
+            # 数据库临时抽风不要让已经在跑的服务崩掉，继续用上一次的结果
+            print(f'[clients] 读注册表失败，沿用上一次的: {exc}')
+            return _cache
+        _cache = {r['client_id']: _row_to_client(r) for r in rows}
+        _loaded_at = time.time()
         return _cache
 
 
@@ -80,22 +75,36 @@ def check_redirect_uri(client: dict[str, Any], redirect_uri: str) -> Optional[st
     return redirect_uri if redirect_uri in client['redirect_uris'] else None
 
 
-def write_template() -> None:
-    if CLIENTS_PATH.exists():
-        return
-    CLIENTS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    data = json.loads(json.dumps(TEMPLATE))
-    data['demo']['secret'] = new_token()
-    CLIENTS_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
+# ---------------------------------------------------------------- manage.py 用
 
-
-def save(clients: dict[str, dict[str, Any]]) -> None:
-    """manage.py 用。写回时把内部字段 client_id 去掉，保持文件干净。"""
-    out = {}
-    for client_id, cfg in clients.items():
-        cfg = dict(cfg)
-        cfg.pop('client_id', None)
-        out[client_id] = {k: v for k, v in cfg.items() if v not in ('', [], None)}
-    CLIENTS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CLIENTS_PATH.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding='utf-8')
+def upsert(client_id: str, name: str = '', secret: str = '', redirect_uris: list[str] = (),
+           logout_uri: str = '', home_url: str = '') -> dict[str, Any]:
+    """注册或覆盖一个业务系统，返回落库后的结果。secret 留空就随机生成一个。"""
+    client_id = client_id.strip()
+    secret = secret or new_token()
+    uris = '\n'.join(u.strip() for u in redirect_uris if u.strip())
+    now = time.time()
+    with db.connect() as conn:
+        conn.execute(
+            'INSERT INTO clients'
+            ' (client_id, name, secret, redirect_uris, logout_uri, home_url, created_at, updated_at)'
+            ' VALUES (%s, %s, %s, %s, %s, %s, %s, %s)'
+            ' ON DUPLICATE KEY UPDATE name = %s, secret = %s, redirect_uris = %s,'
+            ' logout_uri = %s, home_url = %s, updated_at = %s',
+            (client_id, name or client_id, secret, uris, logout_uri.strip(), home_url.strip(),
+             now, now,
+             name or client_id, secret, uris, logout_uri.strip(), home_url.strip(), now),
+        )
     load(force=True)
+    return get(client_id)
+
+
+def delete(client_id: str) -> bool:
+    with db.connect() as conn:
+        cur = conn.execute('DELETE FROM clients WHERE client_id = %s', (client_id.strip(),))
+    load(force=True)
+    return cur.rowcount > 0
+
+
+def exists(client_id: str) -> bool:
+    return (client_id or '').strip() in load(force=True)

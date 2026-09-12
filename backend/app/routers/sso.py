@@ -13,8 +13,7 @@ from urllib.parse import urlencode, urlparse, urlunparse, parse_qsl
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from .. import clients, db
-from ..config import SESSION_COOKIE
+from .. import clients, db, settings
 from ..deps import clear_session_cookie, current_session
 from ..notify import broadcast_logout
 from ..security import secret_equal
@@ -56,7 +55,7 @@ def authorize(request: Request, client_id: str = '', redirect_uri: str = '', sta
         return _error_page(
             '未注册的系统',
             f'client_id <code>{html.escape(client_id) or "(空)"}</code> 不在 '
-            'backend/clients.json 里，先用 <code>python manage.py addclient</code> 注册。')
+            '数据库的 clients 表里，先用 <code>python manage.py addclient</code> 注册。')
 
     target = clients.check_redirect_uri(client, redirect_uri.strip())
     if target is None:
@@ -122,7 +121,7 @@ async def sso_logout(request: Request, client_id: str = ''):
     回跳地址只认注册时填的 home_url，不接受调用方自带地址：
     登出接口最容易被拿来做开放重定向。
     """
-    sid = db.drop_session(request.cookies.get(SESSION_COOKIE, ''))
+    sid = db.drop_session(request.cookies.get(settings.session_cookie(), ''))
 
     client = clients.get(client_id)
     target = (client['home_url'] if client else '') or '/'

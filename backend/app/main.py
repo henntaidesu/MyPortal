@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from . import clients, db
 from .config import DIST_DIR, HOST, PORT
 from .icon import router as icon_router
+from .routers.admin import router as admin_router
 from .routers.auth import router as auth_router
 from .routers.sso import router as sso_router
 
@@ -30,10 +31,12 @@ async def _purge_loop() -> None:
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     db.init_db()
     db.purge_expired()
-    clients.write_template()
     registered = clients.load(force=True)
-    print(f'[sso] 数据库 {db.DB_PATH}')
+    print(f'[sso] 数据库 {db.describe()}')
     print(f'[sso] 已注册业务系统 {len(registered)} 个: {", ".join(registered) or "(无)"}')
+    if db.uses_default_password():
+        print(f'[sso] !! 账号 {db.DEFAULT_ADMIN} 还在用默认口令，'
+              f'改掉：python manage.py passwd {db.DEFAULT_ADMIN}')
     task = asyncio.create_task(_purge_loop())
     try:
         yield
@@ -48,6 +51,7 @@ app = FastAPI(title='Portal SSO', version='1.0.0', lifespan=lifespan)
 app.include_router(auth_router)
 app.include_router(sso_router)
 app.include_router(icon_router)
+app.include_router(admin_router)
 
 
 @app.get('/healthz', include_in_schema=False)
@@ -72,6 +76,12 @@ else:
 
 def main() -> None:
     import uvicorn
+    try:
+        # 先探一下数据库。不然连不上时 uvicorn 会把 starlette 的 traceback
+        # 整页糊在屏幕上，真正有用的那句提示反而被埋了
+        db.init_db()
+    except db.DatabaseUnavailable as exc:
+        raise SystemExit(f'[数据库] {exc}')
     uvicorn.run(app, host=HOST, port=PORT, log_level='info')
 
 

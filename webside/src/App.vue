@@ -3,13 +3,18 @@ import { ref, computed, onMounted } from 'vue'
 import NavCard from './components/NavCard.vue'
 import CardDialog from './components/CardDialog.vue'
 import LoginView from './components/LoginView.vue'
+import SettingsDialog from './components/SettingsDialog.vue'
 import { state, removeItem, moveItem, exportJson, importJson, applyTheme, bindUser, unbindUser } from './store'
 import { auth, refresh, logout, safeNext } from './auth'
 import { download } from './utils'
 
 const keyword = ref('')
 const dialog = ref(null)   // { item } | null，null 表示不显示
+const showSettings = ref(false)
 const fileInput = ref(null)
+
+/* 系统设置只给管理员看。后端每个管理接口也会再校验一次，这里只是别放个点不动的按钮 */
+const isAdmin = computed(() => !!auth.user?.roles?.includes('admin'))
 
 /* 从 /sso/authorize 弹回来时带的落脚点，登录成功后原样跳回去 */
 const next = safeNext(new URLSearchParams(location.search).get('next'))
@@ -98,6 +103,7 @@ onMounted(async () => {
       <div class="top">
         <input v-model="keyword" class="search" placeholder="搜索…" />
         <button class="btn icon" :title="'主题：' + state.theme" @click="toggleTheme">{{ themeIcon }}</button>
+        <button v-if="isAdmin" class="btn icon" title="系统设置" @click="showSettings = true">⚙</button>
         <button class="btn who" :title="'已登录：' + auth.user.username + '，点击退出'" @click="doLogout">
           <span class="dn">{{ auth.user.display_name }}</span>
           <span class="out">退出</span>
@@ -139,6 +145,7 @@ onMounted(async () => {
     </footer>
 
     <CardDialog v-if="dialog" :item="dialog.item" @close="dialog = null" />
+    <SettingsDialog v-if="showSettings" @close="showSettings = false" />
   </div>
 </template>
 

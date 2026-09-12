@@ -2,8 +2,7 @@
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
-from .. import clients, db
-from ..config import SESSION_COOKIE
+from .. import clients, db, settings
 from ..deps import (clear_login_fail, clear_session_cookie, client_ip, current_session,
                     login_blocked, note_login_fail, set_session_cookie)
 from ..notify import broadcast_logout
@@ -55,7 +54,7 @@ def me(request: Request):
 
 @router.post('/logout', status_code=204)
 async def logout(request: Request, response: Response):
-    sid = db.drop_session(request.cookies.get(SESSION_COOKIE, ''))
+    sid = db.drop_session(request.cookies.get(settings.session_cookie(), ''))
     clear_session_cookie(response)
     if sid:
         await broadcast_logout(sid)

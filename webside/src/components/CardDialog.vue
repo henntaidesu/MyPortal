@@ -17,7 +17,7 @@ const form = reactive({
   sso: props.item?.sso || ''
 })
 
-/** 已注册的业务系统。卡片上原本配的那个即使被从 clients.json 里删了也留在列表里，免得静悄悄丢掉 */
+/** 已注册的业务系统。卡片上原本配的那个即使被从注册表里删了也留在列表里，免得静悄悄丢掉 */
 const ssoOptions = computed(() => {
   const list = auth.clients.map((c) => ({ id: c.client_id, label: `${c.name}（${c.client_id}）` }))
   if (form.sso && !list.some((o) => o.id === form.sso)) {

@@ -7,13 +7,14 @@
     python manage.py users
     python manage.py addclient crm --name 客户管理 --redirect-uri http://192.168.1.20:8080/sso/callback
     python manage.py clients
+    python manage.py settings
+    python manage.py set cookie_secure true
 """
 import argparse
 import getpass
-import sqlite3
 import sys
 
-from app import clients, db
+from app import clients, db, settings
 from app.security import new_token
 
 
@@ -29,16 +30,26 @@ def _ask_password(prompt: str = '密码: ') -> str:
         return pw
 
 
+def _warn_default_password() -> None:
+    """默认口令是公开可猜的，只要没改就一直提醒，别让它悄悄留在生产上。"""
+    if not db.uses_default_password():
+        return
+    print()
+    print('  !! 账号 admin 还在用默认口令 admin。')
+    print('     谁能打开这个门户，谁就能免登录进所有已接入的业务系统。')
+    print(f'     改掉：python manage.py passwd {db.DEFAULT_ADMIN}')
+    print()
+
+
 def cmd_init(args) -> int:
     db.init_db()
-    clients.write_template()
-    print(f'数据库就绪: {db.DB_PATH}')
-    print(f'业务系统配置: {clients.CLIENTS_PATH}')
+    print(f'数据库就绪: {db.describe()}')
+    print('已建表: users / sessions / tickets / session_clients / settings / clients')
     if not db.list_users():
-        print('\n还没有任何用户，现在建第一个：')
-        username = input('用户名: ').strip() or 'admin'
-        db.create_user(username, _ask_password(), display_name=username, roles='admin')
-        print(f'已创建 {username}')
+        db.create_user(db.DEFAULT_ADMIN, db.DEFAULT_PASSWORD,
+                       display_name='管理员', roles='admin')
+        print(f'\n已创建默认管理员：{db.DEFAULT_ADMIN} / {db.DEFAULT_PASSWORD}')
+    _warn_default_password()
     return 0
 
 
@@ -47,7 +58,7 @@ def cmd_adduser(args) -> int:
     try:
         user = db.create_user(args.username, password, args.name or args.username,
                               args.email or '', args.roles or '')
-    except sqlite3.IntegrityError:
+    except db.IntegrityError:
         print(f'用户 {args.username} 已存在', file=sys.stderr)
         return 1
     print(f"已创建 {user['username']}（{user['display_name']}）")
@@ -73,6 +84,7 @@ def cmd_users(args) -> int:
         flag = '停用' if r['disabled'] else '正常'
         roles = ','.join(r['roles']) or '-'
         print(f"{r['username']:<{width}}  {flag}  {r['display_name']}  角色:{roles}")
+    _warn_default_password()
     return 0
 
 
@@ -94,22 +106,20 @@ def cmd_deluser(args) -> int:
 
 
 def cmd_addclient(args) -> int:
-    registry = dict(clients.load(force=True))
-    if args.client_id in registry and not args.force:
+    if clients.exists(args.client_id) and not args.force:
         print(f'{args.client_id} 已存在，加 --force 覆盖', file=sys.stderr)
         return 1
-    secret = args.secret or new_token()
-    registry[args.client_id] = {
-        'name': args.name or args.client_id,
-        'secret': secret,
-        'redirect_uris': args.redirect_uri,
-        'logout_uri': args.logout_uri or '',
-        'home_url': args.home_url or '',
-    }
-    clients.save(registry)
+    client = clients.upsert(
+        args.client_id,
+        name=args.name or args.client_id,
+        secret=args.secret or new_token(),
+        redirect_uris=args.redirect_uri,
+        logout_uri=args.logout_uri or '',
+        home_url=args.home_url or '',
+    )
     print(f'已注册 {args.client_id}')
     print(f'  client_id     = {args.client_id}')
-    print(f'  client_secret = {secret}')
+    print(f'  client_secret = {client["secret"]}')
     print('  把这两个值配到业务系统里，secret 只在服务端之间用，别写进前端。')
     return 0
 
@@ -130,12 +140,39 @@ def cmd_clients(args) -> int:
 
 
 def cmd_delclient(args) -> int:
-    registry = dict(clients.load(force=True))
-    if registry.pop(args.client_id, None) is None:
+    if not clients.delete(args.client_id):
         print(f'没有 {args.client_id}', file=sys.stderr)
         return 1
-    clients.save(registry)
     print(f'{args.client_id} 已删除')
+    return 0
+
+
+def cmd_settings(args) -> int:
+    rows = settings.all_items()
+    width = max(len(r['name']) for r in rows)
+    for r in rows:
+        mark = '*' if r['changed'] else ' '
+        limit = f"，{r['low']}~{r['high']}" if r['kind'] == 'int' else ''
+        print(f"{mark} {r['name']:<{width}}  {r['value']}")
+        print(f"  {'':<{width}}  {r['note']}（默认 {r['default']}{limit}）")
+        if r['caution']:
+            print(f"  {'':<{width}}  注意：{r['caution']}")
+    print()
+    print('* = 已改过默认值。改：python manage.py set <名字> <值>')
+    return 0
+
+
+def cmd_set(args) -> int:
+    try:
+        value = settings.put(args.name, args.value)
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        print('可选: ' + ', '.join(settings.DEFAULTS), file=sys.stderr)
+        return 1
+    spec = settings.DEFAULTS[args.name]
+    if spec.caution:
+        print(f'注意：{spec.caution}')
+    print(f'{args.name} = {value}（最多 5 秒后生效，不用重启）')
     return 0
 
 
@@ -188,10 +225,26 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('client_id')
     p.set_defaults(func=cmd_delclient)
 
+    sub.add_parser('settings', help='列出运行期配置（存在数据库里）').set_defaults(func=cmd_settings)
+
+    p = sub.add_parser('set', help='改一项运行期配置')
+    p.add_argument('name')
+    p.add_argument('value')
+    p.set_defaults(func=cmd_set)
+
     return parser
 
 
+def run(argv: list[str] | None = None) -> int:
+    """命令行入口。打包后的 exe 也走这里（见 backend/main.py），
+    逻辑别写回下面的 __main__ 里，不然两条路会慢慢跑偏。"""
+    parsed = build_parser().parse_args(argv)
+    try:
+        db.init_db()
+    except db.DatabaseUnavailable as exc:
+        sys.exit(f'[数据库] {exc}')
+    return parsed.func(parsed) or 0
+
+
 if __name__ == '__main__':
-    parsed = build_parser().parse_args()
-    db.init_db()
-    sys.exit(parsed.func(parsed) or 0)
+    sys.exit(run())

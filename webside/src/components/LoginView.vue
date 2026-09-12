@@ -44,10 +44,7 @@ onMounted(() => userInput.value?.focus())
   <div class="wrap">
     <form class="card" @submit.prevent="submit">
       <h1>登录</h1>
-      <p class="sub">
-        <template v-if="target">登录后直接进入 <code>{{ target }}</code>，那边不用再登一次</template>
-        <template v-else>登录后打开导航面板</template>
-      </p>
+      <p v-if="target" class="sub">登录后直接进入 <code>{{ target }}</code>，那边不用再登一次</p>
 
       <label for="u">用户名</label>
       <input id="u" ref="userInput" v-model="username" autocomplete="username" spellcheck="false" />
@@ -61,8 +58,6 @@ onMounted(() => userInput.value?.focus())
       <button class="btn primary submit" type="submit" :disabled="busy">
         {{ busy ? '登录中…' : '登 录' }}
       </button>
-
-      <p class="hint">忘记密码找管理员，在 backend 目录执行 <code>python manage.py passwd 用户名</code></p>
     </form>
   </div>
 </template>
@@ -84,7 +79,7 @@ onMounted(() => userInput.value?.focus())
   border-radius: var(--radius);
   box-shadow: var(--shadow-lg);
 }
-h1 { margin: 0; font-size: 20px; }
+h1 { margin: 0 0 6px; font-size: 20px; }
 .sub { margin: 8px 0 22px; color: var(--text-3); font-size: 13px; line-height: 1.6; }
 label {
   display: block;
@@ -100,13 +95,6 @@ label {
   letter-spacing: 2px;
 }
 .submit:disabled { opacity: .6; cursor: default; }
-.hint {
-  margin: 18px 0 0;
-  color: var(--text-3);
-  font-size: 11.5px;
-  line-height: 1.7;
-  text-align: center;
-}
 code {
   background: var(--surface-2);
   border-radius: 4px;
