@@ -3,13 +3,14 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>系统导航</title>
+    <title>门户</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧭</text></svg>" />
     <script>
       // 首屏前应用主题，避免闪白
       try {
-        const raw = localStorage.getItem('home-nav')
-        const theme = raw ? JSON.parse(raw).theme : 'auto'
+        // 主题单独存一份，不在按用户分开存的那份数据里；home-nav-theme 是改名前的老键
+        const theme = localStorage.getItem('portal-nav-theme') ||
+          localStorage.getItem('home-nav-theme') || 'auto'
         const dark = theme === 'dark' || (theme !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches)
         document.documentElement.dataset.theme = dark ? 'dark' : 'light'
       } catch (e) {}

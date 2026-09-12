@@ -1,6 +1,7 @@
-import { getOrigin } from './utils'
+import { getOrigin, takeOverKey } from './utils'
 
-const KEY = 'home-nav-icons'
+const KEY = 'portal-nav-icons'
+takeOverKey('home-nav-icons', KEY)    // 改叫 Portal 之前的缓存，接过来省一轮重抓
 const TTL = 7 * 24 * 60 * 60 * 1000   // 取到的图标缓存 7 天
 const FAIL_TTL = 6 * 60 * 60 * 1000   // 取不到的只记 6 小时，站点临时挂掉不至于长期没图标
 const MAX_DATA = 120 * 1024           // 单个图标超过 120KB 就只记地址，不存字节

@@ -1,9 +1,9 @@
-"""集中配置。全部可以用环境变量或 server/.env 覆盖，不改代码。"""
+"""集中配置。全部可以用环境变量或 backend/.env 覆盖，不改代码。"""
 import os
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent.parent          # server/
-ROOT_DIR = BASE_DIR.parent                                 # HomePage/
+BASE_DIR = Path(__file__).resolve().parent.parent          # backend/
+ROOT_DIR = BASE_DIR.parent                                 # Portal/
 
 
 def _load_dotenv(path: Path) -> None:

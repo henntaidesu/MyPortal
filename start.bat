@@ -1,9 +1,9 @@
 @echo off
-title HomePage Nav + SSO - http://localhost:9920
+title Portal - http://localhost:9920
 cd /d "%~dp0"
 
 rem ============================================================
-rem  9920  前端导航主页（vite）
+rem  9920  门户前端（vite）
 rem  9921  认证中心（FastAPI），前端的 /api 和 /sso 都代理到它
 rem ============================================================
 
@@ -87,7 +87,7 @@ if not exist "backend\data\sso.db" (
 rem ---------- 起后端 ----------
 echo.
 echo   Starting auth server on port 9921...
-start "HomePage SSO backend (9921)" /D "%~dp0backend" /MIN %PY% -m app.main
+start "Portal SSO backend (9921)" /D "%~dp0backend" /MIN %PY% -m app.main
 "%SystemRoot%\System32\ping.exe" -n 4 127.0.0.1 >nul
 
 set "BACKPID="
@@ -104,7 +104,7 @@ if not defined BACKPID (
 
 rem ---------- 起前端 ----------
 echo.
-echo   Home nav:  http://localhost:9920
+echo   Portal:    http://localhost:9920
 echo   LAN:       see the Network address printed below
 echo   Close this window to stop both servers.
 echo.

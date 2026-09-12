@@ -86,7 +86,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
           选中后，点这张卡片会先经认证中心换票，进系统时不用再输账号。
         </template>
         <template v-else>
-          还没注册业务系统。在 server 目录执行
+          还没注册业务系统。在 backend 目录执行
           <code>python manage.py addclient &lt;id&gt; --redirect-uri &lt;回调地址&gt;</code>
         </template>
       </p>

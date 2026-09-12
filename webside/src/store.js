@@ -1,5 +1,5 @@
 import { reactive, watch } from 'vue'
-import { uid, normalizeUrl } from './utils'
+import { uid, normalizeUrl, takeOverKey } from './utils'
 
 /**
  * 数据保存在浏览器 localStorage，按登录用户分开存：
@@ -7,9 +7,15 @@ import { uid, normalizeUrl } from './utils'
  *
  * 以后想把导航也搬到后端，只要把 read / write 换成接口请求即可，其余代码不用动。
  */
-const LEGACY_KEY = 'home-nav'          // 加登录之前的老数据
-const THEME_KEY = 'home-nav-theme'     // 主题单独存一份，登录页也要用
-const keyFor = (username) => 'home-nav:' + username
+const THEME_KEY = 'portal-nav-theme'   // 主题单独存一份，登录页也要用
+const keyFor = (username) => 'portal-nav:' + username
+
+/* 改叫 Portal 之前的老键名，登录时按顺序接管，接完就删，老用户无感 */
+const OLD_KEY = (username) => 'home-nav:' + username
+const OLD_ANON_KEY = 'home-nav'        // 更早、还没加登录时那份公共数据
+const OLD_THEME_KEY = 'home-nav-theme'
+
+takeOverKey(OLD_THEME_KEY, THEME_KEY)  // 主题要在下面 normalize 读它之前先接过来
 
 let key = ''
 let stopWatch = null
@@ -37,7 +43,7 @@ function write(k, data) {
 function normalize(data) {
   const d = data || {}
   return {
-    title: d.title || '我的导航',
+    title: d.title || '我的门户',
     theme: d.theme || localStorage.getItem(THEME_KEY) || 'auto',
     items: (Array.isArray(d.items) ? d.items : defaultItems()).map((i) => ({
       id: i.id || uid(),
@@ -70,11 +76,9 @@ export function bindUser(username) {
   stopWatch?.()
   key = keyFor(username)
 
-  // 加登录之前的数据躺在 home-nav 里，第一个登录的人把它接过来
-  if (!localStorage.getItem(key) && localStorage.getItem(LEGACY_KEY)) {
-    localStorage.setItem(key, localStorage.getItem(LEGACY_KEY))
-    localStorage.removeItem(LEGACY_KEY)
-  }
+  // 先认这个人自己的老数据，再认加登录之前那份公共数据（第一个登录的人把它接过来）
+  takeOverKey(OLD_KEY(username), key)
+  takeOverKey(OLD_ANON_KEY, key)
 
   apply(read(key))
   stopWatch = watch(state, () => {
@@ -90,7 +94,7 @@ export function unbindUser() {
   clearTimeout(timer)
   key = ''
   state.items.splice(0, state.items.length)
-  state.title = '我的导航'
+  state.title = '我的门户'
 }
 
 export function addItem(payload) {

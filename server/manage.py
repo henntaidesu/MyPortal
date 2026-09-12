@@ -140,7 +140,7 @@ def cmd_delclient(args) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description='门户单点登录管理工具')
+    parser = argparse.ArgumentParser(description='主页单点登录管理工具')
     sub = parser.add_subparsers(dest='cmd', required=True)
 
     sub.add_parser('init', help='初始化数据库和配置，并建第一个用户').set_defaults(func=cmd_init)
@@ -171,7 +171,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser('addclient', help='注册一个业务系统')
     p.add_argument('client_id')
-    p.add_argument('--name', help='显示名，会出现在门户的下拉框里')
+    p.add_argument('--name', help='显示名，会出现在主页的下拉框里')
     p.add_argument('--redirect-uri', action='append', default=[], required=True,
                    help='回调地址，可重复；必须和业务系统实际用的一字不差')
     p.add_argument('--logout-uri', help='单点登出通知地址，可不填')
@@ -181,7 +181,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_addclient)
 
     p = sub.add_parser('clients', help='列出业务系统')
-    p.add_argument('--show-secret', action='store_true')
+    p.add_argument('--show-secret', action='store_true')我现在已经将项目名称修改为了门户 Portal 需要将原本的homePage相关的代码等进行更新 
     p.set_defaults(func=cmd_clients)
 
     p = sub.add_parser('delclient', help='删除业务系统')

@@ -3,7 +3,7 @@ import { ref, onMounted } from 'vue'
 import { auth, login } from '../auth'
 
 const props = defineProps({
-  /** 登录后要去的站内地址，来自 ?next=；为空就是直接进主页 */
+  /** 登录后要去的站内地址，来自 ?next=；为空就是直接进门户 */
   next: { type: String, default: '' }
 })
 const emit = defineEmits(['done'])
@@ -56,13 +56,13 @@ onMounted(() => userInput.value?.focus())
       <input id="p" v-model="password" type="password" autocomplete="current-password" />
 
       <p v-if="error" class="err">{{ error }}</p>
-      <p v-else-if="auth.offline" class="err">连不上认证服务，请先启动后端（server 目录）</p>
+      <p v-else-if="auth.offline" class="err">连不上认证服务，请先启动后端（backend 目录）</p>
 
       <button class="btn primary submit" type="submit" :disabled="busy">
         {{ busy ? '登录中…' : '登 录' }}
       </button>
 
-      <p class="hint">忘记密码找管理员，在 server 目录执行 <code>python manage.py passwd 用户名</code></p>
+      <p class="hint">忘记密码找管理员，在 backend 目录执行 <code>python manage.py passwd 用户名</code></p>
     </form>
   </div>
 </template>

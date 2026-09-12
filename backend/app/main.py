@@ -1,4 +1,4 @@
-"""认证中心 + 主页静态站点。
+"""认证中心 + 门户静态站点。
 
 开发时前端跑 vite(9920)，接口由 vite 代理到这里(9921)。
 部署时先 npm run build，这个进程直接把 webside/dist 托出去，同源、不用配 CORS。
@@ -43,7 +43,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await task
 
 
-app = FastAPI(title='HomePage SSO', version='1.0.0', lifespan=lifespan)
+app = FastAPI(title='Portal SSO', version='1.0.0', lifespan=lifespan)
 
 app.include_router(auth_router)
 app.include_router(sso_router)
@@ -57,7 +57,7 @@ def healthz():
 
 # 静态站点挂在最后：前面的接口路由先匹配，剩下的才交给它
 if DIST_DIR.is_dir():
-    app.mount('/', StaticFiles(directory=DIST_DIR, html=True), name='home')
+    app.mount('/', StaticFiles(directory=DIST_DIR, html=True), name='portal')
 else:
     @app.get('/', include_in_schema=False)
     def _no_dist():

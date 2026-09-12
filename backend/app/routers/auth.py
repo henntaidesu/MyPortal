@@ -1,4 +1,4 @@
-"""主页自己的登录接口。前端只跟这几个打交道。"""
+"""门户自己的登录接口。前端只跟这几个打交道。"""
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 

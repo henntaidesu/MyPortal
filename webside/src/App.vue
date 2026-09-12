@@ -92,7 +92,7 @@ onMounted(async () => {
 
   <div v-else class="page">
     <header>
-      <h1 contenteditable spellcheck="false" @blur="state.title = $event.target.innerText.trim() || '我的导航'">
+      <h1 contenteditable spellcheck="false" @blur="state.title = $event.target.innerText.trim() || '我的门户'">
         {{ state.title }}
       </h1>
       <div class="top">

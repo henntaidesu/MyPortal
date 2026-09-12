@@ -1,7 +1,7 @@
 # 后端运行时数据和密钥，不要进版本库
-server/data/
-server/.env
-server/clients.json
+backend/data/
+backend/.env
+backend/clients.json
 __pycache__/
 *.pyc
 

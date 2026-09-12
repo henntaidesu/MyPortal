@@ -48,3 +48,18 @@ export function download(filename, text) {
   a.click()
   setTimeout(() => URL.revokeObjectURL(a.href), 1000)
 }
+
+/**
+ * 改名留下的旧 localStorage 键：有旧数据且新键还是空的，就搬过来再把旧键删掉。
+ * 新键已经有数据说明已经迁过了，不覆盖。
+ */
+export function takeOverKey(oldKey, newKey) {
+  try {
+    const old = localStorage.getItem(oldKey)
+    if (old === null || localStorage.getItem(newKey) !== null) return
+    localStorage.setItem(newKey, old)
+    localStorage.removeItem(oldKey)
+  } catch (e) {
+    console.warn('旧数据迁移失败，忽略', e)
+  }
+}

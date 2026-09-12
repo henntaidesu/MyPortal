@@ -1,7 +1,7 @@
 """SSO 核心：签发一次性票据，业务系统后端拿票换用户身份。
 
 为什么是这套流程（CAS 风格）而不是直接把令牌塞进 URL：
-  - 主页和业务系统不同域，Cookie 天然带不过去；
+  - 门户和业务系统不同域，Cookie 天然带不过去；
   - URL 里只出现一次性、60 秒过期、绑死 client 的票据，
     就算被浏览器历史、Referer、日志记下来也换不出身份；
   - 真正的身份数据走服务端到服务端的 HTTP，中间不经过浏览器。
@@ -50,13 +50,13 @@ def _with_query(url: str, params: dict[str, str]) -> str:
 
 @router.get('/authorize')
 def authorize(request: Request, client_id: str = '', redirect_uri: str = '', state: str = ''):
-    """浏览器跳到这里。带着主页会话就发票，没有就先去登录。"""
+    """浏览器跳到这里。带着门户会话就发票，没有就先去登录。"""
     client = clients.get(client_id)
     if client is None:
         return _error_page(
             '未注册的系统',
             f'client_id <code>{html.escape(client_id) or "(空)"}</code> 不在 '
-            'server/clients.json 里，先用 <code>python manage.py addclient</code> 注册。')
+            'backend/clients.json 里，先用 <code>python manage.py addclient</code> 注册。')
 
     target = clients.check_redirect_uri(client, redirect_uri.strip())
     if target is None:
@@ -68,7 +68,7 @@ def authorize(request: Request, client_id: str = '', redirect_uri: str = '', sta
 
     session = current_session(request)
     if session is None:
-        # 回主页登录，登完再原样跳回来。next 只允许站内路径，不接受完整地址，
+        # 回门户登录，登完再原样跳回来。next 只允许站内路径，不接受完整地址，
         # 否则这个接口就成了给别人用的开放重定向。
         back = '/sso/authorize?' + urlencode(
             {'client_id': client_id, 'redirect_uri': target, 'state': state})
@@ -117,7 +117,7 @@ async def validate(request: Request):
 
 @router.get('/logout')
 async def sso_logout(request: Request, client_id: str = ''):
-    """业务系统里点「退出」可以跳到这里，顺手把主页和其它系统一起退掉。
+    """业务系统里点「退出」可以跳到这里，顺手把门户和其它系统一起退掉。
 
     回跳地址只认注册时填的 home_url，不接受调用方自带地址：
     登出接口最容易被拿来做开放重定向。
