@@ -1,4 +1,6 @@
 """门户自己的登录接口。前端只跟这几个打交道。"""
+from typing import Optional
+
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
@@ -16,12 +18,19 @@ class LoginIn(BaseModel):
 
 
 class PasswordIn(BaseModel):
-    old_password: str = Field(min_length=1, max_length=256)
     new_password: str = Field(min_length=6, max_length=256)
 
 
+class ProfileIn(BaseModel):
+    """改自己的资料。字段全可选，只有传上来的才会动。"""
+    username: Optional[str] = Field(None, min_length=2, max_length=64)
+    display_name: Optional[str] = Field(None, max_length=128)
+    email: Optional[str] = Field(None, max_length=191)
+
+
 def _public(user: dict) -> dict:
-    return {k: user[k] for k in ('username', 'display_name', 'email', 'roles')}
+    # id 要给前端：本地那份导航按 id 分区存，按用户名分区的话改个名就找不回来了
+    return {k: user[k] for k in ('id', 'username', 'display_name', 'email', 'roles')}
 
 
 @router.post('/login')
@@ -62,12 +71,44 @@ async def logout(request: Request, response: Response):
 
 @router.post('/password', status_code=204)
 def change_password(body: PasswordIn, request: Request):
+    """改自己的密码。
+
+    **不验原密码是刻意的**（产品要求），所以这个接口的安全性完全压在会话 Cookie 上：
+    谁拿到会话，谁就能改掉这个账号的密码。别在这上面再加别的权限动作。
+    会话本身的防线还在——Cookie 是 httponly、只存指纹、登录有限流。
+    """
     session = current_session(request)
     if session is None:
         raise HTTPException(401, '未登录')
-    if db.check_login(session['user']['username'], body.old_password) is None:
-        raise HTTPException(400, '原密码不正确')
     db.set_password(session['user']['username'], body.new_password)
+
+
+@router.patch('/profile')
+def update_profile(body: ProfileIn, request: Request):
+    """改自己的用户名 / 显示名 / 邮箱。有会话就能改，不再验当前密码。
+
+    原来改用户名要验一次密码，但 /api/password 已经不验原密码了——拿到会话的人
+    先改掉密码就能过这道校验，挡不住人只挡手，索性去掉。所以这里和改密码一样，
+    安全性全压在会话 Cookie 上。
+    改完不掉线，导航也不会丢——会话和 nav 表记的都是 user_id，不是用户名。
+    """
+    session = current_session(request)
+    if session is None:
+        raise HTTPException(401, '未登录')
+
+    me = session['user']['username']
+    new_name = (body.username or '').strip()
+
+    try:
+        user = db.update_user(me, new_username=new_name or None,
+                              display_name=body.display_name, email=body.email)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+    except db.IntegrityError:
+        raise HTTPException(400, f'用户名 {new_name} 已经有人用了') from None
+    if user is None:
+        raise HTTPException(404, '账号已经不在了，请重新登录')
+    return {'user': _public(user)}
 
 
 @router.get('/sso/clients')

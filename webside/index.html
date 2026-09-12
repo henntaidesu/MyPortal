@@ -4,7 +4,10 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>门户</title>
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧭</text></svg>" />
+    <!-- 指南针图标，public/ 下的真实文件；打包成 exe 时 exe 图标、托盘图标、
+         运行窗口图标用的都是同一份，见 portal.spec -->
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="icon" type="image/png" href="/favicon.png" />
     <script>
       // 首屏前应用主题，避免闪白
       try {

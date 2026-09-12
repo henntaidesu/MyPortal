@@ -16,7 +16,9 @@ from .config import DIST_DIR, HOST, PORT
 from .icon import router as icon_router
 from .routers.admin import router as admin_router
 from .routers.auth import router as auth_router
+from .routers.nav import router as nav_router
 from .routers.sso import router as sso_router
+from .routers.users import router as users_router
 
 PURGE_INTERVAL = 3600
 
@@ -52,6 +54,8 @@ app.include_router(auth_router)
 app.include_router(sso_router)
 app.include_router(icon_router)
 app.include_router(admin_router)
+app.include_router(users_router)
+app.include_router(nav_router)
 
 
 @app.get('/healthz', include_in_schema=False)
@@ -82,7 +86,18 @@ def main() -> None:
         db.init_db()
     except db.DatabaseUnavailable as exc:
         raise SystemExit(f'[数据库] {exc}')
-    uvicorn.run(app, host=HOST, port=PORT, log_level='info')
+
+    # 不用 uvicorn.run()：托盘的「退出程序」要拿到 Server 对象才能设 should_exit。
+    # timeout_graceful_shutdown 是兜底上限，免得哪个连接一直不断开就永远停不下来。
+    config = uvicorn.Config(app, host=HOST, port=PORT, log_level='info',
+                            timeout_graceful_shutdown=5)
+    server = uvicorn.Server(config)
+    # 打包成 exe 且在 Windows 上时挂托盘图标和运行窗口，其余情况整段是 no-op；
+    # pystray/Pillow 没装也只是没托盘，不能因此起不来服务
+    with contextlib.suppress(Exception):
+        from .tray import attach
+        attach(server)
+    server.run()
 
 
 if __name__ == '__main__':

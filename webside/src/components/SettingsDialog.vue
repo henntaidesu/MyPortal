@@ -1,127 +1,64 @@
 <script setup>
-/** 系统设置。只有 roles 里带 admin 的人能打开，后端也会再校验一次。 */
-import { ref, onMounted, onBeforeUnmount } from 'vue'
-import { api } from '../api'
+/**
+ * 设置面板的外壳，里面分三页：
+ *   我的账号   人人都有，改自己的用户名 / 显示名 / 邮箱 / 密码
+ *   用户管理   建号、改号、重置密码、停用、删除
+ *   系统配置   settings 表里那几项运行期配置
+ *
+ * 后两页只给 roles 里带 admin 的人看。前端这层藏按钮只是别摆个点不动的东西，
+ * 真正拦人的是后端 deps.require_admin，每个管理接口都会再校验一次。
+ */
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
+import AccountPanel from './AccountPanel.vue'
+import UsersPanel from './UsersPanel.vue'
+import ConfigPanel from './ConfigPanel.vue'
+import { auth } from '../auth'
 
 const emit = defineEmits(['close'])
 
-const items = ref([])
-const draft = ref({})          // name -> 正在编辑的值
-const saving = ref('')         // 正在保存哪一项
-const error = ref('')
-const okFlash = ref('')        // 刚存好的那项，闪一下「已保存」
-const loading = ref(true)
+const isAdmin = computed(() => !!auth.user?.roles?.includes('admin'))
+const tabs = computed(() => [
+  { key: 'account', label: '我的账号' },
+  ...(isAdmin.value
+    ? [{ key: 'users', label: '用户管理' }, { key: 'config', label: '系统配置' }]
+    : [])
+])
+const tab = ref('account')
 
-async function reload() {
-  try {
-    const data = await api('/api/settings')
-    items.value = data.items
-    draft.value = Object.fromEntries(data.items.map((i) => [i.name, i.value]))
-  } catch (e) {
-    error.value = e.message
-  } finally {
-    loading.value = false
-  }
-}
-
-function dirty(item) {
-  return String(draft.value[item.name]) !== item.value
-}
-
-async function save(item) {
-  error.value = ''
-  saving.value = item.name
-  try {
-    const res = await api(`/api/settings/${item.name}`, {
-      method: 'PUT',
-      body: { value: String(draft.value[item.name]) }
-    })
-    // 用后端规范化后的值回填：填 "ON" 存进去是 "true"
-    item.value = res.value
-    item.changed = res.value !== item.default
-    draft.value[item.name] = res.value
-    okFlash.value = item.name
-    setTimeout(() => (okFlash.value === item.name) && (okFlash.value = ''), 1600)
-  } catch (e) {
-    error.value = e.message
-    draft.value[item.name] = item.value      // 存失败就把输入框退回原值，免得看着像已经生效
-  } finally {
-    saving.value = ''
-  }
-}
-
-function reset(item) {
-  draft.value[item.name] = item.default
-  save(item)
-}
+/* 三页内容长短不一，但对话框大小是钉死的（见下面的 .dialog），只有中间这块滚。
+   换页时把它滚回顶上，不然从翻到一半的「系统配置」切过去会停在半空 */
+const body = ref(null)
+watch(tab, () => body.value?.scrollTo(0, 0))
 
 function onKey(e) {
   if (e.key === 'Escape') emit('close')
 }
-onMounted(() => {
-  window.addEventListener('keydown', onKey)
-  reload()
-})
+onMounted(() => window.addEventListener('keydown', onKey))
 onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 </script>
 
 <template>
   <div class="mask" @mousedown.self="emit('close')">
     <div class="dialog">
-      <h3>系统设置</h3>
-      <p class="lead">
-        这些配置存在数据库里，改完最多 5 秒生效，不用重启。
-        数据库连接和监听端口不在这里，它们在 <code>backend/conf.ini</code>，改完要重启。
-      </p>
+      <div class="head">
+        <h3>设置</h3>
 
-      <p v-if="loading" class="muted">正在读取…</p>
-      <p v-else-if="error && !items.length" class="err">{{ error }}</p>
-
-      <div v-for="item in items" :key="item.name" class="row">
-        <div class="head">
-          <label :for="'s-' + item.name">{{ item.name }}</label>
-          <span v-if="item.changed" class="tag">已改过默认值</span>
+        <div v-if="tabs.length > 1" class="tabs">
+          <button
+            v-for="t in tabs"
+            :key="t.key"
+            class="tab"
+            :class="{ on: tab === t.key }"
+            @click="tab = t.key"
+          >{{ t.label }}</button>
         </div>
-        <p class="note">{{ item.note }}</p>
-
-        <div class="ctl">
-          <select v-if="item.kind === 'bool'" :id="'s-' + item.name" v-model="draft[item.name]">
-            <option value="true">true（开）</option>
-            <option value="false">false（关）</option>
-          </select>
-          <input
-            v-else-if="item.kind === 'int'"
-            :id="'s-' + item.name"
-            v-model="draft[item.name]"
-            type="number"
-            :min="item.low"
-            :max="item.high"
-            @keyup.enter="save(item)"
-          />
-          <input
-            v-else
-            :id="'s-' + item.name"
-            v-model="draft[item.name]"
-            @keyup.enter="save(item)"
-          />
-
-          <button class="btn primary" :disabled="!dirty(item) || saving === item.name" @click="save(item)">
-            {{ saving === item.name ? '保存中' : '保存' }}
-          </button>
-          <button class="btn" :disabled="item.value === item.default" @click="reset(item)">
-            复原
-          </button>
-          <span v-if="okFlash === item.name" class="ok">已保存</span>
-        </div>
-
-        <p class="meta">
-          默认 <code>{{ item.default }}</code>
-          <template v-if="item.kind === 'int'">，可填 {{ item.low }} ~ {{ item.high }}</template>
-        </p>
-        <p v-if="item.caution" class="caution">注意：{{ item.caution }}</p>
       </div>
 
-      <p v-if="error && items.length" class="err">{{ error }}</p>
+      <div ref="body" class="body">
+        <AccountPanel v-if="tab === 'account'" />
+        <UsersPanel v-else-if="tab === 'users'" />
+        <ConfigPanel v-else-if="tab === 'config'" />
+      </div>
 
       <div class="foot">
         <button class="btn" @click="emit('close')">关闭</button>
@@ -143,66 +80,63 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
   z-index: 50;
   animation: fade .15s;
 }
+/* 大小是钉死的：三页内容长短差很多，跟着内容走的话切一下页对话框就蹦一下。
+   头和脚不动，只有中间的 .body 滚；滚动条用 scrollbar-gutter 占着位，
+   免得某一页不用滚时内容跟着横向挪 8 个像素 */
 .dialog {
-  width: 560px;
+  display: flex;
+  flex-direction: column;
+  width: 620px;
   max-width: 100%;
-  max-height: 90vh;
-  overflow: auto;
-  padding: 22px;
+  height: min(820px, calc(100vh - 40px));   /* 40px = 遮罩上下各 20px 的内边距 */
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: var(--shadow-lg);
   animation: pop .16s cubic-bezier(.2, .9, .3, 1.2);
 }
-h3 { margin: 0 0 10px; font-size: 16px; }
-.lead {
-  margin: 0 0 18px;
-  color: var(--text-3);
-  font-size: 12.5px;
-  line-height: 1.75;
+.head { flex: none; padding: 22px 22px 0; }
+.body {
+  flex: 1;
+  min-height: 0;              /* 不写这行 flex 子项不肯缩，滚动条会长到外面去 */
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  padding: 0 22px 6px;
 }
-.muted { color: var(--text-3); font-size: 13px; }
+h3 { margin: 0 0 14px; font-size: 16px; }
 
-.row {
-  padding: 14px 0;
+.tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 16px;
+  padding: 3px;
+  background: var(--surface-2);
+  border-radius: var(--radius-sm);
+}
+.tab {
+  flex: 1;
+  height: 32px;
+  border-radius: 7px;
+  color: var(--text-2);
+  font-size: 13px;
+  transition: background .15s, color .15s;
+}
+.tab:hover { color: var(--text); }
+.tab.on {
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 600;
+  box-shadow: var(--shadow);
+}
+
+.foot {
+  flex: none;
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 16px 22px 22px;
   border-top: 1px solid var(--border);
 }
-.head { display: flex; align-items: center; gap: 8px; }
-label { font-size: 13.5px; font-weight: 600; }
-.tag {
-  font-size: 11px;
-  color: var(--text-3);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 1px 8px;
-}
-.note { margin: 4px 0 0; color: var(--text-2); font-size: 12.5px; }
-
-.ctl {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 9px;
-}
-.ctl input, .ctl select { flex: 1 1 180px; min-width: 0; }
-.ok { color: var(--ok, #2e9e5b); font-size: 12.5px; }
-
-.meta { margin: 7px 0 0; color: var(--text-3); font-size: 11.5px; }
-.meta code {
-  background: var(--surface-2);
-  border-radius: 4px;
-  padding: 1px 5px;
-}
-.caution {
-  margin: 6px 0 0;
-  font-size: 11.5px;
-  line-height: 1.7;
-  color: var(--danger);
-}
-.err { color: var(--danger); font-size: 13px; margin: 14px 0 0; }
-.foot { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
 @keyframes fade { from { opacity: 0 } }
 @keyframes pop { from { opacity: 0; transform: translateY(8px) scale(.98) } }
 </style>

@@ -4,6 +4,7 @@
     python manage.py init
     python manage.py adduser zhangsan --name 张三
     python manage.py passwd zhangsan
+    python manage.py rename zhangsan zhang.san
     python manage.py users
     python manage.py addclient crm --name 客户管理 --redirect-uri http://192.168.1.20:8080/sso/callback
     python manage.py clients
@@ -14,11 +15,19 @@ import argparse
 import getpass
 import sys
 
-from app import clients, db, settings
+from app import clients, db, settings, winconsole
 from app.security import new_token
 
 
 def _ask_password(prompt: str = '密码: ') -> str:
+    # 打包成 exe 之后这里是借来的控制台，提示符已经还给 cmd 了，再 getpass
+    # 就是和人抢输入缓冲，敲进去的字符两边各拿一半。改弹个小框收，原因见
+    # app/winconsole.py 开头。源码态走不到这一支。
+    if not winconsole.can_prompt():
+        pw = winconsole.ask_password(hint=prompt.rstrip(': ').strip() or '设置口令')
+        if pw is None:
+            raise SystemExit('已取消。')
+        return pw
     while True:
         pw = getpass.getpass(prompt)
         if len(pw) < 6:
@@ -44,7 +53,7 @@ def _warn_default_password() -> None:
 def cmd_init(args) -> int:
     db.init_db()
     print(f'数据库就绪: {db.describe()}')
-    print('已建表: users / sessions / tickets / session_clients / settings / clients')
+    print('已建表: users / sessions / tickets / session_clients / settings / nav / clients')
     if not db.list_users():
         db.create_user(db.DEFAULT_ADMIN, db.DEFAULT_PASSWORD,
                        display_name='管理员', roles='admin')
@@ -58,10 +67,30 @@ def cmd_adduser(args) -> int:
     try:
         user = db.create_user(args.username, password, args.name or args.username,
                               args.email or '', args.roles or '')
+    except ValueError as exc:          # 用户名格式不合法，db.validate_username 挡下来的
+        print(exc, file=sys.stderr)
+        return 1
     except db.IntegrityError:
         print(f'用户 {args.username} 已存在', file=sys.stderr)
         return 1
     print(f"已创建 {user['username']}（{user['display_name']}）")
+    return 0
+
+
+def cmd_rename(args) -> int:
+    if db.get_user(args.username) is None:
+        print(f'没有用户 {args.username}', file=sys.stderr)
+        return 1
+    try:
+        user = db.update_user(args.username, new_username=args.new_username)
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    except db.IntegrityError:
+        print(f'用户名 {args.new_username} 已经有人用了', file=sys.stderr)
+        return 1
+    print(f"{args.username} 已改名为 {user['username']}（在线会话不受影响）")
+    print('  注意：按用户名认人的业务系统那边会当成另一个人，记得同步改。')
     return 0
 
 
@@ -196,6 +225,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_passwd)
 
     sub.add_parser('users', help='列出用户').set_defaults(func=cmd_users)
+
+    p = sub.add_parser('rename', help='改用户名（会话不受影响，业务系统那边要同步改）')
+    p.add_argument('username')
+    p.add_argument('new_username')
+    p.set_defaults(func=cmd_rename)
 
     for name, helptext in (('disable', '停用用户'), ('enable', '启用用户')):
         p = sub.add_parser(name, help=helptext)

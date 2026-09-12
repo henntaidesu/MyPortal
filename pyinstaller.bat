@@ -47,6 +47,23 @@ if errorlevel 1 (
     if errorlevel 1 ( echo ERROR: pip install failed & pause & exit /b 1 )
 )
 
+rem ===== Run window (tkinter) + tray icon (pystray/Pillow) =====
+rem Deliberately NOT in backendequirements.txt: the server itself does not
+rem need them, only the packaged desktop shell does (app\logwindow.py, app	ray.py).
+python -c "import tkinter" >nul 2>&1
+if errorlevel 1 (
+    echo ERROR: this Python has no tkinter, the run window cannot be bundled.
+    echo        Reinstall Python with the tcl/tk option ^(or use a python.org build^), then rerun.
+    pause
+    exit /b 1
+)
+python -c "import pystray, PIL" >nul 2>&1
+if errorlevel 1 (
+    echo Tray deps missing, installing pystray + pillow ...
+    python -m pip install pystray pillow
+    if errorlevel 1 ( echo ERROR: pip install pystray pillow failed & pause & exit /b 1 )
+)
+
 rem ===== 准备发布目录 =====
 echo.
 echo [2/4] Cleaning and creating release dir %RELEASE% ...
@@ -80,7 +97,7 @@ if not exist "%ROOT%webside\dist\index.html" (
 
 rem ===== 构建 Portal.exe =====
 echo.
-echo [4/4] Building Portal.exe (console; frontend bundled in) ...
+echo [4/4] Building Portal.exe (windowed; frontend + run window + tray bundled in) ...
 python -m PyInstaller --clean --noconfirm "%ROOT%portal.spec" ^
     --distpath "%RELEASE%" --workpath "%ROOT%build"
 if errorlevel 1 (
@@ -118,6 +135,12 @@ echo   4. Portal.exe               - start the auth server, open http://localhos
 echo.
 echo   Account / client management uses the same exe:
 echo      Portal.exe users / adduser / passwd / clients / addclient / settings
+echo.
+echo   Portal.exe is windowed: double-clicking opens a run window with live logs,
+echo   no CMD box. Clicking X asks "minimize to tray" or "quit"; the tray icon at
+echo   the bottom-right keeps it running in the background and reopens the window.
+echo   Subcommands run from a cmd window print into that same window (the prompt
+echo   comes back first, so output lands under it); password entry pops a dialog.
 echo.
 echo   The frontend is bundled inside Portal.exe. To swap it without rebuilding,
 echo   put a "webside" folder (the contents of webside\dist) next to Portal.exe.

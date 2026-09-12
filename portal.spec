@@ -1,8 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller spec —— 门户 Portal 认证中心（FastAPI + uvicorn，同端口提供接口和前端）。
 
-产物是单文件 Portal.exe，**带控制台**：uvicorn 的日志要看得见，
-`Portal.exe adduser` 这类子命令还要在控制台里交互输密码。
+产物是单文件 Portal.exe，**windowed（console=False）**：双击不弹 CMD 黑框，
+日志看运行窗口（app/logwindow.py），点 X 可以收进托盘后台跑（app/tray.py）。
+
+本来更想用 console=True + hide_console='hide-early'，那样命令行那半边一点不用改。
+但 Win11 默认终端换成 Windows Terminal 之后 hide_console 是空转的：它靠
+ShowWindow(GetConsoleWindow()) 藏窗口，而那个句柄是代理窗口，藏了屏幕上的黑框照样在
+（实测全程挂着）。所以只能 windowed，代价是子命令那边要自己去借控制台，
+见 app/winconsole.py。
 
 两件和路径有关、改之前要想清楚的事（对应 backend/app/config.py 里的 FROZEN 分支）：
 
@@ -48,7 +54,19 @@ hiddenimports = [
     'app', 'app.main', 'app.config', 'app.db', 'app.settings', 'app.security',
     'app.clients', 'app.deps', 'app.notify', 'app.icon',
     'app.routers', 'app.routers.auth', 'app.routers.sso', 'app.routers.admin',
+    'app.logwindow', 'app.tray', 'app.winconsole',   # 桌面外壳，见下面那段
     'manage',            # 无参起服务，带参走 manage.run()，见 backend/main.py
+]
+
+# 桌面外壳（app/logwindow.py / app/tray.py / app/winconsole.py）的依赖。它们的
+# import 全写在函数里——源码态起服务不该为了一个托盘图标去装 pystray——静态分析
+# 看不见，得显式列。tkinter 还要靠自带的 hook 把 tcl/tk 那堆运行时文件一起带上。
+hiddenimports += [
+    'tkinter',
+    'pystray',
+    'pystray._win32',    # pystray 按平台在运行时选后端，静态分析同样看不见
+    'PIL.Image',
+    'PIL.ImageDraw',
 ]
 
 # 前端构建产物整体打入（onefile 运行时解压到 _MEIPASS/webside）
@@ -60,10 +78,23 @@ if os.path.isdir(WEBSIDE_DIST):
         for _f in _fs:
             datas.append((os.path.join(_dp, _f), _dest))
     print('[portal.spec] 已打入前端 webside/dist -> webside')
+    # favicon.png / favicon.ico 就在 public/ 里，跟着 dist 一起进来了，
+    # 托盘和运行窗口运行时从 webside/favicon.png 读，见 app/tray.py 的 icon_path
 else:
     # 直接失败，不能只警告：少了前端的 exe 一样能跑起来、一样能登录，
     # 只是打开首页是一片「前端还没打包」，到现场才发现就晚了
     raise SystemExit(f'[portal.spec] 没找到 {WEBSIDE_DIST}，先在 webside 目录执行 npm run build')
+
+
+# exe 图标用门户网页那个 favicon（指南针），和托盘、运行窗口是同一张图。
+# 取 public/ 下的源文件而不是 dist 里的副本：这个不依赖前端有没有构建过。
+ICON_ICO = os.path.join(ROOT, 'webside', 'public', 'favicon.ico')
+if os.path.isfile(ICON_ICO):
+    icon_arg = ICON_ICO
+    print(f'[portal.spec] exe 图标 {ICON_ICO}')
+else:
+    icon_arg = None
+    print('[portal.spec] 警告：没找到 webside/public/favicon.ico，exe 用 PyInstaller 默认图标')
 
 
 a = Analysis(
@@ -78,10 +109,12 @@ a = Analysis(
     # 这些一个都用不上。排掉不只是为了瘦身：在 anaconda base 里打包时，
     # 只要有哪条边不小心连到 PyQt5 和 PySide6 两个 Qt 绑定，PyInstaller 会
     # 直接中止构建（它不支持同时收集两个 Qt 绑定）
+    # 注意 tkinter 和 PIL 不在这里：运行窗口用 tkinter，托盘图标用 PIL 现画，
+    # 排掉的话构建照样过，跑起来是「双击 exe 只有一个空托盘/干脆没有窗口」
     excludes=[
-        'PyQt5', 'PyQt6', 'PySide2', 'PySide6', 'tkinter',
+        'PyQt5', 'PyQt6', 'PySide2', 'PySide6',
         'IPython', 'ipykernel', 'jupyter', 'notebook', 'nbformat', 'zmq',
-        'numpy', 'pandas', 'scipy', 'matplotlib', 'PIL',
+        'numpy', 'pandas', 'scipy', 'matplotlib',
         'pytest', 'mypy', 'sphinx', 'docutils', 'black', 'yapf',
         'jedi', 'parso', 'astroid', 'setuptools', 'pip',
     ],
@@ -104,8 +137,11 @@ exe = EXE(
     upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=True,
-    icon=None,          # 仓库里没有 .ico，用 PyInstaller 默认图标
+    # 无控制台：双击不弹黑框。子命令从 cmd 里调起来时自己 AttachConsole
+    # 借调用方的控制台，见 app/winconsole.py——别为了省那一步改回 console=True，
+    # 上面文档里写了 hide_console 在 Win11 上为什么救不了场。
+    console=False,
+    icon=icon_arg,      # 门户网页的 favicon，见上面 ICON_ICO
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

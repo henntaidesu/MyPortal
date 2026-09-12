@@ -32,8 +32,9 @@ npm run build                # 产物 webside/dist，后端会自动托管
 pyinstaller.bat              # 产物 Releases\<版本>\Portal.exe
 ```
 
-账号 / 业务系统管理都在 `backend/manage.py`：`users` `adduser` `passwd` `disable` `enable`
-`deluser` `clients` `addclient` `delclient`。注册业务系统：
+账号 / 业务系统管理都在 `backend/manage.py`：`users` `adduser` `passwd` `rename` `disable`
+`enable` `deluser` `clients` `addclient` `delclient`。账号那几项页面上也有（见下），
+命令行这套的意义是不看会话、不看角色，管理员把自己锁在门外时还能救。注册业务系统：
 
 ```bash
 python manage.py addclient crm --name "客户管理系统" \
@@ -71,9 +72,10 @@ python manage.py addclient crm --name "客户管理系统" \
 URL 里只出现票据，身份数据走服务端到服务端。要给别的系统对接，直接把
 [docs/对接文档.md](docs/对接文档.md) 发过去，那份是自包含的。
 
-六张表都在 [backend/app/db.py](backend/app/db.py) 的 `SCHEMA` 里：`users`、
+七张表都在 [backend/app/db.py](backend/app/db.py) 的 `SCHEMA` 里：`users`、
 `sessions`（门户会话）、`tickets`（一次性票）、`session_clients`（这个会话登过哪些系统，
-用于单点登出广播）、`clients`（业务系统注册表）、`settings`（运行期配置）。
+用于单点登出广播）、`clients`（业务系统注册表）、`settings`（运行期配置）、
+`nav`（每人一行的导航数据，整份 JSON）。
 
 ### 不能放松的安全不变量
 
@@ -88,6 +90,17 @@ URL 里只出现票据，身份数据走服务端到服务端。要给别的系�
 - **令牌只存 sha256 指纹**（`token_fingerprint`），库泄露也换不回可用 Cookie。
 - **登录失败不区分原因**，用户不存在时也跑一次同开销的哈希，防时序探测。
 - `client_secret` 绝不下发前端；`/api/sso/clients` 只返回 id 和名字。
+- **不能停用/删除自己，也不能动最后一个还启用着的管理员**（停用、删除、摘 admin 角色都挡，
+  [users.py](backend/app/routers/users.py) `_guard_last_admin`）。放开就能一步把所有人关在门外。
+- **`/api/password` 不验原密码、`/api/profile` 改名也不验**（产品要求，两处注释里都写了）。
+  所以这两个接口的安全性完全压在会话 Cookie 上：谁拿到会话，谁就能改掉这个账号的密码和用户名。
+  别再往这两条路上加别的权限动作。会话本身的防线还在——Cookie 是 httponly、库里只存指纹、
+  登录有限流。（原来改名要验一次密码，但改密码都不验了，先改密码就能过那道校验，挡不住人只挡手。）
+- **管理员重置别人口令后，把那个人的会话全踢掉并广播登出**，免得拿旧口令换来的会话还在用。
+- **`/api/nav` 的 `user_id` 只从会话里取**（[nav.py](backend/app/routers/nav.py) `_me`），
+  接口上不接受任何指定用户的参数。加一个就等于谁都能读写别人的导航。
+- **用户名只走白名单**（[db.py](backend/app/db.py) `validate_username`，字母数字和 `_.-`）。
+  它会进 URL、日志，还会原样发给业务系统当用户标识；中文写在 `display_name` 里。
 
 ### 会踩的坑
 
@@ -95,8 +108,9 @@ URL 里只出现票据，身份数据走服务端到服务端。要给别的系�
   登录 Cookie，表现为登录后立刻又变成未登录。
 - **门户必须挂在域名根路径**：[NavCard.vue](webside/src/components/NavCard.vue) 里的 `href`
   是硬编码的绝对路径 `/sso/authorize`。挂子路径要改这里。
-- **管理端接口一律走 [deps.py](backend/app/deps.py) 的 `require_admin`**（roles 里要有 admin）。
-  这是仓库里唯一一处角色校验。`manage.py init` 会建一个默认管理员 `admin`/`admin`
+- **管理端接口一律走 [deps.py](backend/app/deps.py) 的 `require_admin`**（roles 里要有 admin）——
+  `/api/settings/*` 和 `/api/users/*` 整两组都在里面，页面上「设置 → 用户管理 / 系统配置」
+  两页也是照它藏的。这是仓库里唯一一处角色校验。`manage.py init` 会建一个默认管理员 `admin`/`admin`
   （[db.py](backend/app/db.py) 的 `DEFAULT_ADMIN` / `DEFAULT_PASSWORD`），
   口令没改过时 `manage.py` 和服务启动都会打警告——这是故意反复提醒，别去掉。
   万一 admin 账号全没了，命令行那套始终还能用。
@@ -123,15 +137,35 @@ URL 里只出现票据，身份数据走服务端到服务端。要给别的系�
 - `backend/conf.ini` 含数据库密码，已在 .gitignore 里，仓库里**不该**出现它。
   没有 .example 模板文件，缺文件时由 config.py 的 `_TEMPLATE` 现生成一份。
 
-### 导航数据存在浏览器里
+### 导航数据存在 MySQL，localStorage 只是缓存
 
-导航卡片存 `localStorage`，按用户分 key（`portal-nav:<用户名>`，改名前的 `home-nav*` 旧键首次读取时自动接管），**没有进后端**，
-所以换台机器要重配。要搬到后端，只改 [webside/src/store.js](webside/src/store.js) 里的
-`read()` / `write()` 两个函数，其余代码不用动——这是该文件刻意保持的边界。
+导航卡片存在 `nav` 表里，一人一行、整份 JSON（`{title, theme, items[]}`），
+所以换台机器登进来就能看到自己那份。接口是 `/api/nav` 的 GET / PUT
+（[nav.py](backend/app/routers/nav.py)），前端这一侧全在
+[webside/src/store.js](webside/src/store.js) 的 `pull()` / `push()` 两个函数里，
+其余代码不关心数据从哪来——这是该文件刻意保持的边界。
 
-后端只管三件事：用户/会话（`/api/login` `/api/me` `/api/logout` `/api/password`）、
-SSO（`/sso/authorize` `/sso/validate` `/sso/logout`）、站点图标代理（`/api/icon`，需登录，
-替调用方发请求所以不对匿名开放）。
+- **`user_id` 只从会话里取，接口上没有任何指定用户的参数。** 放一个进来就等于
+  谁都能读写别人那份导航。管理端也没有改别人导航的入口，这份数据不归管理端管。
+- **localStorage 退成缓存**：进页面先画缓存不等接口，后端连不上时照常能看能改。
+  改动一发生就打一个 `portal-nav:u<id>:dirty` 标记，推成功才清掉；
+  下次 `bindUser` 看到标记就**先推后拉**，免得把本机没同步的改动冲掉。
+  页面底部那行「连不上后端，改动暂时只存在本机」就是 `sync.offline`。
+- **冲突是后写的盖先写的**，不做合并。自己给自己看的一页东西，为它做合并不值当。
+- **老用户的数据是自动搬上去的**：`/api/nav` 返回 `data: null`（后端还没有这份）时，
+  前端把本机缓存推上去。别去掉这条分支，不然老用户第一次登录会看到一片空。
+- **卡片里有哪些字段后端不管**（`_clean` 只看标题、主题、条数和体积）：让后端跟着校验，
+  卡片上加个字段就得两头一起改。加字段只改 store.js 的 `normalize()`。
+- **分区键用用户 id（`portal-nav:u<id>`）不是用户名**：用户名页面上就能改，按名字存的话
+  改完名连本机缓存都对不上了。所以 `/api/me` 要下发 `id`
+  （[auth.py](backend/app/routers/auth.py) 的 `_public`），`bindUser` 收的是整个 user 对象。
+  本机老键一站站往新键上搬，`takeOverKey` 只在新键还空着时才搬：
+  `home-nav:<名字>`（改叫 Portal 之前）→ `portal-nav:<名字>`（按名字分区那版）→ `portal-nav:u<id>`。
+
+后端管这几件事：用户/会话（`/api/login` `/api/me` `/api/logout` `/api/password` `/api/profile`）、
+用户管理（`/api/users*`，仅 admin）、导航数据（`/api/nav`，只碰自己那份）、
+运行期配置（`/api/settings*`，仅 admin）、SSO（`/sso/authorize` `/sso/validate` `/sso/logout`）、
+站点图标代理（`/api/icon`，需登录，替调用方发请求所以不对匿名开放）。
 
 ## 配置分两层
 
@@ -145,7 +179,8 @@ SSO（`/sso/authorize` `/sso/validate` `/sso/logout`）、站点图标代理（`
 Cookie 名和 `cookie_secure`、票据有效期、登出通知超时、登录限流。带 5 秒缓存，不用重启。
 清单、默认值、取值范围和副作用提示都在 `DEFAULTS` 的 `Spec` 里，`init_db` 会把它补进表中。
 两个入口：命令行 `manage.py settings` / `manage.py set <名字> <值>`，以及门户页面右上角
-齿轮按钮（只有 admin 看得见）。
+齿轮按钮里的「系统配置」页。齿轮人人都有（「我的账号」谁都能改），
+但「系统配置」和「用户管理」两页只有 admin 看得见。
 
 加新配置项只改 `DEFAULTS` 一处：命令行、接口、设置页都是照着它渲染的。
 
@@ -157,9 +192,48 @@ Cookie 名和 `cookie_secure`、票据有效期、登出通知超时、登录限
 ## 打包成 exe
 
 `pyinstaller.bat` + [portal.spec](portal.spec)，产物是单文件 `Releases\<版本>\Portal.exe`
-（22 MB 上下）。入口是 [backend/main.py](backend/main.py)：**不带参数就起服务，带参数就是
-manage.py 的那套子命令**（`Portal.exe init` / `adduser` / `addclient` …）。合成一个 exe 是
-因为拆两个要多背一份运行时，而且现场十有八九只拷走其中一个，到了那边建不了账号。
+（35 MB 上下），发布目录里**只有这一个文件**。入口是 [backend/main.py](backend/main.py)：
+**不带参数就起服务，带参数就是 manage.py 的那套子命令**（`Portal.exe init` / `adduser` /
+`addclient` …）。合成一个 exe 是因为拆两个要多背一份运行时，而且现场十有八九只拷走
+其中一个，到了那边建不了账号。
+
+图标三处同一张：exe 图标、托盘图标、运行窗口图标都用门户网页的 favicon
+（`webside/public/favicon.ico` / `favicon.png`，指南针，就是 index.html 里 `<link rel=icon>`
+指的那两个文件）。换图标只换这两个文件，spec 和 [tray.py](backend/app/tray.py) 的
+`icon_path` 会跟着走。
+
+### 双击是桌面程序，命令行还是命令行
+
+exe 打成 **windowed（`console=False`）**：双击不弹 CMD 黑框，起来的是一个运行窗口
+（[logwindow.py](backend/app/logwindow.py)）实时显示 uvicorn 日志，点 X 问「收进托盘 /
+退出程序」，收进托盘后认证中心继续在后台跑，右下角托盘图标
+（[tray.py](backend/app/tray.py)）能再打开窗口、打开门户、优雅退出。
+
+这几条是踩出来的，改之前先读：
+
+- **别改回 `console=True` + `hide_console`。** PyInstaller 那个 `hide_console='hide-early'`
+  靠 `ShowWindow(GetConsoleWindow())` 藏窗口，而 Win11 默认终端是 Windows Terminal，
+  拿到的是个代理窗口——实测黑框从启动到退出全程挂着，等于没做。
+- **windowed 的代价：进程启动时没有控制台，`sys.stdout/stderr` 全是 None。**
+  子命令得自己去借一个，见 [winconsole.py](backend/app/winconsole.py)。
+- **借控制台不能用 `AttachConsole(ATTACH_PARENT_PROCESS)`。** onefile 跑起来是两个进程，
+  干活的是引导器 fork 的子进程，它的「父进程」是引导器、引导器自己也没控制台，
+  必然 `ERROR_INVALID_HANDLE`。所以要顺着进程链一路往上试到那个 cmd。
+- **口令输入改成 Tk 小框。** cmd 不等 GUI 子系统的进程，提示符早还回去了，
+  这时候再 `getpass` 就是和人抢同一个输入缓冲，字符两边各拿一半。
+  `manage.py` 的 `_ask_password` 靠 `winconsole.can_prompt()` 分流，源码态照旧走 getpass。
+- **重定向的情况别去动标准流**：`Portal.exe clients > out.txt` 时句柄是有效的，
+  Python 自己已经把 `sys.stdout` 建好了，这时再 `open('CONOUT$')` 会把输出写进控制台、
+  文件留个空的。`attach_parent` 只接管那几个 None 掉的。
+- **`logwindow` 的 `_Tee` 必须能接受 `base=None`**，windowed 下传进来的就是 None。
+  它得是个合法文件对象：uvicorn 配日志时会问 `isatty()`，logging 会调 `write`/`flush`，
+  哪个抛异常都能把服务带崩。
+- **启动失败时要把窗口按住**（`logwindow.hold`）。`sys.exit('去填数据库密码')` 那句提示
+  是解释器退出时才打的，那会儿窗口早跟着进程没了——没有控制台可以退，双击的人
+  只会看到「闪一下，什么都没有」。
+- **tkinter / pystray / Pillow 不在 `backend/requirements.txt` 里**，只有 `pyinstaller.bat`
+  打包前会装。源码态起服务不该为了一个托盘图标去装 pystray，所以这三个模块里的
+  import 全写在函数里，缺了就静默跳过。spec 的 `excludes` 里**不能**再排 `tkinter` 和 `PIL`。
 
 冻结后路径规则全在 [config.py](backend/app/config.py) 的 `FROZEN` 分支里，改之前先想清楚：
 
@@ -178,3 +252,5 @@ manage.py 的那套子命令**（`Portal.exe init` / `adduser` / `addclient` …
   协议实现要手写进 `hiddenimports`。
 - 脚本自己就叫 `pyinstaller.bat`，所以里面必须写 `python -m PyInstaller`——
   裸写 `pyinstaller` 会被 cmd 解析成这个脚本本身，死循环。
+- **发布目录只放 Portal.exe**，对接文档不往里拷（要发就从仓库的 `docs/` 发）。
+  `conf.ini` 既不打进 exe 也不从本机拷——本机那份带着真实数据库密码。

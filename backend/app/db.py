@@ -105,6 +105,16 @@ SCHEMA = (
     ) {_TABLE_SUFFIX}
     """,
     f"""
+    CREATE TABLE IF NOT EXISTS nav (
+        user_id    BIGINT UNSIGNED NOT NULL,
+        data       MEDIUMTEXT      NOT NULL,
+        updated_at DOUBLE          NOT NULL,
+        PRIMARY KEY (user_id),
+        CONSTRAINT fk_nav_user FOREIGN KEY (user_id)
+            REFERENCES users (id) ON DELETE CASCADE
+    ) {_TABLE_SUFFIX}
+    """,
+    f"""
     CREATE TABLE IF NOT EXISTS clients (
         client_id     VARCHAR(64)  NOT NULL,
         name          VARCHAR(128) NOT NULL DEFAULT '',
@@ -348,13 +358,30 @@ def _row_to_user(row: Optional[dict]) -> Optional[dict[str, Any]]:
 
 # ---------------------------------------------------------------- 用户
 
+# 用户名不只是个登录名：它会原样传给业务系统当用户标识（docs/对接文档.md 里
+# 明说了「拿它作为你系统里的用户标识」），还会出现在 URL 和日志里。所以只放行
+# 最保守的一组字符，中文名字请填显示名 display_name。
+# 大小写不敏感的唯一性由 users 表的唯一索引 + utf8mb4_general_ci 排序规则保证。
+USERNAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.-]{1,63}$')
+
+
+def validate_username(username: str) -> str:
+    """规范化并校验用户名，不合法抛 ValueError。建号和改名都必须走这里。"""
+    name = (username or '').strip()
+    if not USERNAME_RE.match(name):
+        raise ValueError('用户名只能用字母、数字、下划线、点、连字符，'
+                         '以字母或数字开头，长度 2~64（中文请填显示名）')
+    return name
+
+
 def create_user(username: str, password: str, display_name: str = '',
                 email: str = '', roles: str = '') -> dict[str, Any]:
+    username = validate_username(username)
     with connect() as conn:
         cur = conn.execute(
             'INSERT INTO users (username, password, display_name, email, roles, created_at)'
             ' VALUES (%s, %s, %s, %s, %s, %s)',
-            (username.strip(), hash_password(password), display_name.strip(),
+            (username, hash_password(password), display_name.strip(),
              email.strip(), roles.strip(), time.time()),
         )
         row = conn.execute('SELECT * FROM users WHERE id = %s', (cur.lastrowid,)).fetchone()
@@ -372,6 +399,46 @@ def list_users() -> list[dict[str, Any]]:
     with connect() as conn:
         rows = conn.execute('SELECT * FROM users ORDER BY id').fetchall()
     return [_row_to_user(r) for r in rows]
+
+
+def admin_usernames() -> list[str]:
+    """还能登进来的管理员。停用、删人、摘 admin 角色之前都要拿它挡一下最后一个。"""
+    return [u['username'] for u in list_users() if 'admin' in u['roles'] and not u['disabled']]
+
+
+def update_user(username: str, *, new_username: Optional[str] = None,
+                display_name: Optional[str] = None, email: Optional[str] = None,
+                roles: Optional[str] = None) -> Optional[dict[str, Any]]:
+    """改用户资料，只有显式传进来的字段会动。没这个人返回 None。
+
+    改名不会把人踢下线：sessions 记的是 user_id，不是用户名。
+    用户名撞车时抛 IntegrityError（唯一索引兜底），调用方翻成人话。
+    """
+    username = username.strip()
+    sets: list[str] = []
+    args: list[Any] = []
+    if new_username is not None:
+        sets.append('username = %s')
+        args.append(validate_username(new_username))
+    if display_name is not None:
+        sets.append('display_name = %s')
+        args.append(display_name.strip()[:128])
+    if email is not None:
+        sets.append('email = %s')
+        args.append(email.strip()[:191])
+    if roles is not None:
+        sets.append('roles = %s')
+        args.append(roles.strip()[:255])
+    if not sets:
+        return get_user(username)
+    with connect() as conn:
+        row = conn.execute('SELECT id FROM users WHERE username = %s', (username,)).fetchone()
+        if row is None:
+            return None
+        # 拼进 SQL 的只有上面这几个写死的列名，值全走占位符
+        conn.execute(f"UPDATE users SET {', '.join(sets)} WHERE id = %s", (*args, row['id']))
+        return _row_to_user(
+            conn.execute('SELECT * FROM users WHERE id = %s', (row['id'],)).fetchone())
 
 
 def set_password(username: str, password: str) -> bool:
@@ -464,6 +531,49 @@ def drop_session(token: str) -> Optional[str]:
         conn.execute('DELETE FROM sessions WHERE fingerprint = %s', (fp,))
         conn.execute('DELETE FROM tickets WHERE session_sid = %s', (row['sid'],))
     return row['sid']
+
+
+def sessions_of_user(username: str) -> list[str]:
+    """这个人当前在线的会话号。踢人之前先取出来，删完才好挨个通知业务系统。"""
+    with connect() as conn:
+        rows = conn.execute(
+            'SELECT s.sid AS sid FROM sessions s JOIN users u ON u.id = s.user_id'
+            ' WHERE u.username = %s', (username.strip(),)).fetchall()
+    return [r['sid'] for r in rows]
+
+
+def drop_sessions_of_user(username: str) -> list[str]:
+    """踢掉这个人全部的门户会话，返回被踢掉的 sid，交给上层广播单点登出。"""
+    sids = sessions_of_user(username)
+    if not sids:
+        return []
+    marks = ', '.join(['%s'] * len(sids))
+    with connect() as conn:
+        conn.execute(f'DELETE FROM tickets WHERE session_sid IN ({marks})', sids)
+        conn.execute(f'DELETE FROM sessions WHERE sid IN ({marks})', sids)
+    return sids
+
+
+# ---------------------------------------------------------------- 导航数据
+
+def get_nav(user_id: int) -> Optional[tuple[str, float]]:
+    """返回 (整份导航的 JSON 文本, 更新时间)；这个人还没存过就返回 None。"""
+    with connect() as conn:
+        row = conn.execute('SELECT data, updated_at FROM nav WHERE user_id = %s',
+                           (user_id,)).fetchone()
+    return (row['data'], row['updated_at']) if row else None
+
+
+def set_nav(user_id: int, data: str) -> float:
+    """整份覆盖写，返回更新时间。后写的盖先写的，不做合并。"""
+    now = time.time()
+    with connect() as conn:
+        conn.execute(
+            'INSERT INTO nav (user_id, data, updated_at) VALUES (%s, %s, %s)'
+            ' ON DUPLICATE KEY UPDATE data = %s, updated_at = %s',
+            (user_id, data, now, data, now),
+        )
+    return now
 
 
 # ---------------------------------------------------------------- 一次性票据

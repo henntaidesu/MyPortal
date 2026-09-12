@@ -4,7 +4,7 @@ import NavCard from './components/NavCard.vue'
 import CardDialog from './components/CardDialog.vue'
 import LoginView from './components/LoginView.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
-import { state, removeItem, moveItem, exportJson, importJson, applyTheme, bindUser, unbindUser } from './store'
+import { state, sync, removeItem, moveItem, exportJson, importJson, applyTheme, bindUser, unbindUser, flushNav } from './store'
 import { auth, refresh, logout, safeNext } from './auth'
 import { download } from './utils'
 
@@ -12,9 +12,6 @@ const keyword = ref('')
 const dialog = ref(null)   // { item } | null，null 表示不显示
 const showSettings = ref(false)
 const fileInput = ref(null)
-
-/* 系统设置只给管理员看。后端每个管理接口也会再校验一次，这里只是别放个点不动的按钮 */
-const isAdmin = computed(() => !!auth.user?.roles?.includes('admin'))
 
 /* 从 /sso/authorize 弹回来时带的落脚点，登录成功后原样跳回去 */
 const next = safeNext(new URLSearchParams(location.search).get('next'))
@@ -68,17 +65,19 @@ function toggleTheme() {
 const themeIcon = computed(() => ({ auto: '🌗', light: '☀️', dark: '🌙' }[state.theme]))
 
 /* 登录之后：装上这个人的导航数据，该跳业务系统的就直接跳过去 */
-function enter() {
-  bindUser(auth.user.username)
+async function enter() {
+  // 马上要跳去业务系统了，别浪费一次导航同步
   if (next) {
     location.replace(next)
     return
   }
   if (location.search) history.replaceState(null, '', location.pathname)
+  await bindUser(auth.user)
 }
 
 async function doLogout() {
   if (!confirm('退出登录？已经打开的系统也会一并退出。')) return
+  await flushNav()          // 攒着的改动先落库，不然跟着会话一起没了
   await logout()
   unbindUser()
 }
@@ -103,7 +102,7 @@ onMounted(async () => {
       <div class="top">
         <input v-model="keyword" class="search" placeholder="搜索…" />
         <button class="btn icon" :title="'主题：' + state.theme" @click="toggleTheme">{{ themeIcon }}</button>
-        <button v-if="isAdmin" class="btn icon" title="系统设置" @click="showSettings = true">⚙</button>
+        <button class="btn icon" title="设置（账号、用户、系统配置）" @click="showSettings = true">⚙</button>
         <button class="btn who" :title="'已登录：' + auth.user.username + '，点击退出'" @click="doLogout">
           <span class="dn">{{ auth.user.display_name }}</span>
           <span class="out">退出</span>
@@ -137,6 +136,9 @@ onMounted(async () => {
 
     <footer>
       <span>共 {{ state.items.length }} 个</span>
+      <span v-if="sync.offline" class="offline" title="改动先存在这台机器上，下次连上后端会自动补传">
+        · 连不上后端，改动暂时只存在本机
+      </span>
       <span class="dot">·</span>
       <button class="link" @click="doExport">导出备份</button>
       <span class="dot">·</span>
@@ -227,6 +229,7 @@ footer {
   font-size: 12px;
 }
 .dot { margin: 0 6px; }
+.offline { color: var(--danger); margin-left: 4px; }
 .link { color: var(--text-3); text-decoration: underline; text-underline-offset: 3px; }
 .link:hover { color: var(--primary); }
 
