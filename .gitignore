@@ -1,0 +1,10 @@
+# 后端运行时数据和密钥，不要进版本库
+server/data/
+server/.env
+server/clients.json
+__pycache__/
+*.pyc
+
+# 前端
+node_modules/
+dist/
