@@ -22,6 +22,12 @@ else:
 
 CONF_PATH = BASE_DIR / 'conf.ini'
 
+# 站点图标的磁盘缓存目录，启动时自动建（app/iconcache.py 的 ensure）。
+# 和 conf.ini 一样挂在 BASE_DIR 下：源码态是 backend/icons，打包后是 exe 同级的 icons。
+# 绝不能放 sys._MEIPASS——那是每次启动现解压的临时目录，缓存进去等于没缓存。
+# 不做成配置项：它和 DIST_DIR 一样，跟着仓库结构走就够了，多一项就多一处能填错的地方。
+ICON_DIR = BASE_DIR / 'icons'
+
 # 自动生成的 conf.ini 内容。不写注释：改这里的默认值同时也改了新装机器拿到的模板
 _TEMPLATE = """[database]
 host = 127.0.0.1

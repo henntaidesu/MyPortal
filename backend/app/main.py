@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import clients, db
+from . import clients, db, iconcache
 from .config import DIST_DIR, HOST, PORT
 from .icon import router as icon_router
 from .routers.admin import router as admin_router
@@ -27,14 +27,18 @@ async def _purge_loop() -> None:
     while True:
         await asyncio.sleep(PURGE_INTERVAL)
         await asyncio.to_thread(db.purge_expired)
+        await asyncio.to_thread(iconcache.purge)   # 顺手把过期的图标缓存删了
 
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     db.init_db()
     db.purge_expired()
+    iconcache.ensure()          # 图标缓存目录，没有就建
+    iconcache.purge()
     registered = clients.load(force=True)
     print(f'[sso] 数据库 {db.describe()}')
+    print(f'[sso] 图标缓存 {iconcache.describe()}')
     print(f'[sso] 已注册业务系统 {len(registered)} 个: {", ".join(registered) or "(无)"}')
     if db.uses_default_password():
         print(f'[sso] !! 账号 {db.DEFAULT_ADMIN} 还在用默认口令，'

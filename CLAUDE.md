@@ -167,6 +167,23 @@ URL 里只出现票据，身份数据走服务端到服务端。要给别的系�
 运行期配置（`/api/settings*`，仅 admin）、SSO（`/sso/authorize` `/sso/validate` `/sso/logout`）、
 站点图标代理（`/api/icon`，需登录，替调用方发请求所以不对匿名开放）。
 
+### 图标缓存是磁盘目录，不进数据库
+
+`/api/icon` 抓回来的图落在 `ICON_DIR`（[config.py](backend/app/config.py)）里，
+源码态是 `backend/icons`，打包后是 exe 同级的 `icons`。目录启动时自动建
+（[iconcache.py](backend/app/iconcache.py) 的 `ensure`），**整个删掉也没事**，
+下次访问自己会重建重抓；已在 .gitignore 里。
+
+- **「抓不到」也要存**（`<指纹>.miss`，6 小时）。不存的话，一个没有 favicon 的站点
+  会让每次开门户都去外网白跑一趟，超时还得干等 6 秒。抓到的存 7 天。
+- **不进数据库**：是一堆几十 KB 的二进制，而且随时可以重抓，塞进 MySQL 只会让备份变大。
+- **写缓存先写 `.tmp` 再 `os.replace`**：中途断电不会留下半张图被当成好的发出去。
+  漏下的 `.tmp` 残骸由每小时那趟 `purge` 收走。
+- **前端不再自己缓存图标**。原来那份在浏览器 localStorage 里（`portal-nav-icons`），
+  一人一台机器各存一份，换人登录还会继承上一个人的缓存、能反推出对方配过哪些站点。
+  现在 [icons.js](webside/src/icons.js) 只负责拼 `/api/icon` 的地址，直接交给 `<img src>`，
+  重复访问靠响应上的 `cache-control` 让浏览器缓一天。
+
 ## 配置分两层
 
 **`backend/conf.ini`**（[config.py](backend/app/config.py) 读，标准库 configparser）只放
@@ -240,6 +257,9 @@ exe 打成 **windowed（`console=False`）**：双击不弹 CMD 黑框，起来�
 - **`conf.ini` 绝不能打进 exe。** 打进去的话每次启动都被临时解压目录里的那份盖掉，
   改了密码等于白改。所以 `BASE_DIR` 在冻结态取的是 `sys.executable` 所在目录，
   不是 `sys._MEIPASS`。exe 首次运行会在自己旁边生成 conf.ini 然后退出，和源码态一个流程。
+- **`ICON_DIR` 同理，跟着 `BASE_DIR` 走**（exe 同级的 `icons`），别顺手改成 `_MEIPASS` 下面——
+  那是每次启动现解压的临时目录，缓存写进去等于没缓存，每次重启都要把所有图标重抓一遍。
+  所以 exe 跑起来之后，发布目录里除了 Portal.exe 还会多出 `conf.ini` 和 `icons/`，这是正常的。
 - **前端打进 exe**（解压在 `_MEIPASS/webside`），但 exe 同级放一个 `webside` 目录就能盖掉它，
   换前端不用重新打包。
 - **spec 里用 `SPECPATH` 定位项目根，不要用 `os.getcwd()`**：从别的目录调起来会算错，

@@ -11,3 +11,6 @@ dist/
 build/
 Releases/
 backend\conf.ini
+
+# 图标磁盘缓存（运行时自动生成，删了会自己重建）
+backend/icons/

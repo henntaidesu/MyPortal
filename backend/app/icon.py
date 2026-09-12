@@ -6,6 +6,9 @@
 两种调法，前端两种都会发：
     /api/icon?url=<图片地址>    直接代取这张图
     /api/icon?site=<站点根地址>  由后端解析 <link rel="icon">，解析不到再退 /favicon.ico
+
+取到的图（和「取不到」这件事）都落在磁盘上，见 app/iconcache.py。
+所以同一个站点全公司只去外网抓一次，前端不用再自己缓存。
 """
 import re
 from urllib.parse import urljoin, urlparse
@@ -13,6 +16,7 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from fastapi import APIRouter, HTTPException, Request, Response
 
+from . import iconcache
 from .deps import current_session
 
 router = APIRouter(prefix='/api', tags=['icon'])
@@ -103,6 +107,11 @@ async def _resolve_site(http: httpx.AsyncClient, origin: str) -> tuple[bytes, st
     return None
 
 
+def _image(data: bytes, ctype: str) -> Response:
+    return Response(data, media_type=ctype,
+                    headers={'cache-control': 'public, max-age=86400'})
+
+
 @router.get('/icon')
 async def icon(request: Request, url: str = '', site: str = ''):
     # 要求登录：这个接口会替调用方发请求，不该对匿名访问者开放
@@ -111,14 +120,23 @@ async def icon(request: Request, url: str = '', site: str = ''):
     if not url and not site:
         raise HTTPException(400, 'url 或 site 至少给一个')
 
+    kind = 'url' if url else 'site'
     target = _check_url(url or site)
+
+    cached = iconcache.load(kind, target)
+    if cached is iconcache.MISS:
+        raise HTTPException(404, 'not found')       # 上次就没抓到，别再去外网白跑
+    if cached is not None:
+        return _image(*cached)
+
     async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True, max_redirects=3,
                                  headers={'user-agent': 'Portal-IconProxy/1.0'}) as http:
         got = await _fetch_image(http, target) if url else await _resolve_site(http, target)
 
     if got is None:
+        iconcache.save_miss(kind, target)
         raise HTTPException(404, 'not found')
 
     data, ctype = got
-    return Response(data, media_type=ctype,
-                    headers={'cache-control': 'public, max-age=86400'})
+    iconcache.save(kind, target, data, ctype)
+    return _image(data, ctype)

@@ -1,7 +1,7 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
 import { colorOf, initials } from '../utils'
-import { peekIcon, loadIcon } from '../icons'
+import { iconUrl } from '../icons'
 
 const props = defineProps({
   item: { type: Object, required: true },
@@ -13,20 +13,12 @@ const isText = computed(() => !!custom.value && !/^(https?:\/\/|data:|\/)/i.test
 const text = computed(() => (isText.value ? custom.value : initials(props.item.name)))
 const isEmoji = computed(() => /\p{Extended_Pictographic}/u.test(text.value))
 
-const src = ref('')
-let seq = 0
-
-function refresh() {
-  const mine = ++seq
-  if (isText.value) return (src.value = '')
-  if (custom.value.startsWith('data:')) return (src.value = custom.value)
-  src.value = peekIcon(props.item)          // 命中缓存直接出图，不闪
-  loadIcon(props.item).then((got) => {
-    if (mine === seq) src.value = got
-  })
-}
-
-watch(() => [props.item.url, props.item.icon], refresh, { immediate: true })
+/* 直接把 /api/icon 的地址交给 <img>：图缓存在后端，浏览器再按 cache-control 缓一天，
+   不用前端自己 fetch 成 dataURL 再塞进来。后端 404（那站点没图标）就走 onerror 退文字徽标 */
+const failed = ref(false)
+const src = computed(() => (isText.value ? '' : iconUrl(props.item)))
+watch(src, () => (failed.value = false))
+const shown = computed(() => (failed.value ? '' : src.value))
 </script>
 
 <template>
@@ -35,11 +27,11 @@ watch(() => [props.item.url, props.item.icon], refresh, { immediate: true })
     :style="{
       width: size + 'px',
       height: size + 'px',
-      background: src ? 'var(--surface-2)' : colorOf(item.name || item.url),
+      background: shown ? 'var(--surface-2)' : colorOf(item.name || item.url),
       fontSize: (isEmoji ? size * 0.55 : size * 0.36) + 'px'
     }"
   >
-    <img v-if="src" :src="src" alt="" @error="src = ''" />
+    <img v-if="shown" :src="shown" alt="" @error="failed = true" />
     <span v-else :class="{ emoji: isEmoji }">{{ text }}</span>
   </div>
 </template>
