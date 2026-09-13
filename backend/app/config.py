@@ -205,7 +205,7 @@ if not AUTH_PASSWORD:
 
 
 def uses_default_password() -> bool:
-    """还在用默认口令。启动时据此打警告，页面上也会提示一句。"""
+    """还在用默认口令。启动时据此打一条警告（app/main.py）。"""
     return AUTH_PASSWORD == DEFAULT_PASSWORD
 
 

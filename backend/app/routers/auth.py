@@ -6,7 +6,6 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
 
 from .. import auth
-from ..config import uses_default_password
 
 router = APIRouter(prefix='/api', tags=['auth'])
 
@@ -17,11 +16,8 @@ class LoginIn(BaseModel):
 
 
 def _public(user: str | None) -> dict:
-    """下发给前端的身份信息。默认口令的提示也挂在这儿，登录页和面板都要用。"""
-    return {
-        'user': {'username': user} if user else None,
-        'default_password': uses_default_password(),
-    }
+    """下发给前端的身份信息。只有一个账号，所以除了名字没别的可说。"""
+    return {'user': {'username': user} if user else None}
 
 
 @router.get('/me')

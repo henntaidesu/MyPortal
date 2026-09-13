@@ -11,22 +11,11 @@ import { renameGroup, groupIndex } from '../store'
 import { drag, startCard, startGroup, overCard, overGroup, leaveGroup, dropOnCard, dropOnGroup, end } from '../drag'
 
 const props = defineProps({
-  group: { type: Object, required: true },
-  /** 过滤后要显示的卡片。搜索时只是 group.items 的一个子集 */
-  items: { type: Array, required: true },
-  /** 搜索状态下不给拖：显示的下标和真实下标对不上，拖了会错位 */
-  sortable: { type: Boolean, default: true }
+  group: { type: Object, required: true }
 })
 const emit = defineEmits(['add', 'edit', 'remove-item', 'remove-group'])
 
 const gid = computed(() => props.group.id)
-
-/* 拖放要的是卡片在 group.items 里的**真实**下标，不是过滤后的。
-   搜索状态下这两个对不上，所以顺手把真实下标算出来一起带着 */
-const rows = computed(() =>
-  props.items.map((it) => ({ it, i: props.group.items.indexOf(it) }))
-)
-
 const isDropTarget = computed(() => !!drag.kind && drag.overGid === gid.value)
 const isDragging = computed(() => drag.kind === 'group' && drag.fromIndex === groupIndex(gid.value))
 
@@ -55,7 +44,6 @@ function onLeave(e) {
   >
     <header class="ghead">
       <span
-        v-if="sortable"
         class="grip"
         title="拖动调整分类顺序"
         draggable="true"
@@ -81,33 +69,31 @@ function onLeave(e) {
 
     <div class="grid">
       <div
-        v-for="row in rows"
-        :key="row.it.id"
+        v-for="(it, i) in group.items"
+        :key="it.id"
         class="slot"
         :class="{
-          over: drag.kind === 'card' && drag.overGid === gid && drag.overIndex === row.i,
-          dragging: drag.kind === 'card' && drag.fromGid === gid && drag.fromIndex === row.i
+          over: drag.kind === 'card' && drag.overGid === gid && drag.overIndex === i,
+          dragging: drag.kind === 'card' && drag.fromGid === gid && drag.fromIndex === i
         }"
-        :draggable="sortable"
-        @dragstart="startCard(gid, row.i)"
-        @dragover.prevent.stop="sortable && overCard(gid, row.i)"
-        @drop.prevent.stop="sortable ? dropOnCard(gid, row.i) : null"
+        draggable="true"
+        @dragstart="startCard(gid, i)"
+        @dragover.prevent.stop="overCard(gid, i)"
+        @drop.prevent.stop="dropOnCard(gid, i)"
         @dragend="end"
       >
         <NavCard
-          :item="row.it"
-          @edit="emit('edit', { group, item: row.it })"
-          @remove="emit('remove-item', { group, item: row.it })"
+          :item="it"
+          @edit="emit('edit', { group, item: it })"
+          @remove="emit('remove-item', { group, item: it })"
         />
       </div>
 
-      <button v-if="sortable" class="add" @click="emit('add', group)">
+      <button class="add" @click="emit('add', group)">
         <span class="plus">＋</span>
         <span>添加导航</span>
       </button>
     </div>
-
-    <p v-if="!rows.length && !sortable" class="none">这个分类里没有匹配的</p>
   </section>
 </template>
 
@@ -204,8 +190,6 @@ function onLeave(e) {
   background: var(--surface-2);
 }
 .plus { font-size: 22px; line-height: 1; }
-
-.none { margin: 0; color: var(--text-3); font-size: 12.5px; }
 
 @media (max-width: 600px) {
   .grid { grid-template-columns: 1fr; }

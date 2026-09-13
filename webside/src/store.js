@@ -132,6 +132,8 @@ function normalize(data) {
     groups = defaultGroups()
   }
   return {
+    // title 页面上不显示了（左上角那行标题去掉了），但照样读进来、照样写回去——
+    // 不然谁在 conf.json 里手写了一个标题，下次存导航就被悄悄抹掉
     title: d.title || DEFAULT_TITLE,
     theme: d.theme || localStorage.getItem(THEME_KEY) || 'auto',
     groups
@@ -154,11 +156,6 @@ function apply(next) {
   state.title = next.title
   state.theme = next.theme
   state.groups.splice(0, state.groups.length, ...next.groups)
-}
-
-/** 卡片总数，页面底部那行要用 */
-export function totalItems() {
-  return state.groups.reduce((n, g) => n + g.items.length, 0)
 }
 
 /**
@@ -210,20 +207,9 @@ async function reconcile(cached) {
   }
 }
 
-/** 退出登录前调用：把攒着的改动落下去，别跟着会话一起丢了 */
-export async function flushNav() {
-  if (!stopWatch) return
-  clearTimeout(localTimer)
-  clearTimeout(pushTimer)
-  writeLocal()
-  if (!isDirty()) return
-  try {
-    await push()
-  } catch { /* 推不上去就留着脏标记，下次登录再说 */ }
-}
-
-/** 登出：停掉自动保存并清空内存里这份，别让登录页背后还留着一屏卡片。
-    本机缓存留着不动——只有一个账号，下次登录还是同一个人，留着能少等一次接口 */
+/** 会话没了：停掉自动保存并清空内存里这份，别让登录页背后还留着一屏卡片。
+    本机缓存留着不动——只有一个账号，下次登录还是同一个人，留着能少等一次接口。
+    没落盘的改动也不会丢：脏标记还在 localStorage 里，下次登录会先推后拉 */
 export function unbind() {
   stopWatch?.()
   stopWatch = null
@@ -321,19 +307,11 @@ export function moveItem(fromGid, fromIndex, toGid, toIndex) {
   to.items.splice(at, 0, item)
 }
 
-// ------------------------------------------------------------------ 其它
+// ------------------------------------------------------------------ 主题
+// 页面上没有切换按钮了，主题跟着 conf.json 里的 nav.theme 走，默认 auto = 跟随系统。
+// 不 export：只有这个文件自己用。首屏那一下由 index.html 里的内联脚本负责，避免闪白。
 
-export function exportJson() {
-  return JSON.stringify(state, null, 2)
-}
-
-export function importJson(text) {
-  const next = normalize(JSON.parse(text))
-  state.title = next.title
-  state.groups.splice(0, state.groups.length, ...next.groups)
-}
-
-export function applyTheme() {
+function applyTheme() {
   const dark = state.theme === 'dark' ||
     (state.theme === 'auto' && matchMedia('(prefers-color-scheme: dark)').matches)
   document.documentElement.dataset.theme = dark ? 'dark' : 'light'

@@ -40,15 +40,6 @@ export function colorOf(str) {
   return PALETTE[h % PALETTE.length]
 }
 
-export function download(filename, text) {
-  const blob = new Blob([text], { type: 'application/json;charset=utf-8' })
-  const a = document.createElement('a')
-  a.href = URL.createObjectURL(blob)
-  a.download = filename
-  a.click()
-  setTimeout(() => URL.revokeObjectURL(a.href), 1000)
-}
-
 /**
  * 改名留下的旧 localStorage 键：有旧数据且新键还是空的，就搬过来再把旧键删掉。
  * 新键已经有数据说明已经迁过了，不覆盖。

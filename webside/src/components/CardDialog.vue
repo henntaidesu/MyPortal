@@ -59,22 +59,19 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
         </div>
       </div>
 
-      <label>分类</label>
-      <select v-model="form.group">
+      <!-- 不放 label、也不放 placeholder：从上到下依次是 分类 / 名称 / 地址 / 描述 / 图标。
+           title 留着，鼠标停一下还认得出是哪一栏，屏幕阅读器也有 aria-label 可念。 -->
+      <select v-model="form.group" title="分类" aria-label="分类">
         <option v-for="g in state.groups" :key="g.id" :value="g.id">{{ g.name }}</option>
       </select>
 
-      <label>名称</label>
-      <input ref="nameInput" v-model="form.name" placeholder="例如：运维监控" @keyup.enter="submit" />
+      <input ref="nameInput" v-model="form.name" title="名称" aria-label="名称" @keyup.enter="submit" />
 
-      <label>地址</label>
-      <input v-model="form.url" placeholder="192.168.1.10:8080 或 https://example.com" @keyup.enter="submit" />
+      <input v-model="form.url" title="地址" aria-label="地址" @keyup.enter="submit" />
 
-      <label>描述<span class="opt">（可选）</span></label>
-      <input v-model="form.desc" placeholder="留空显示域名" @keyup.enter="submit" />
+      <input v-model="form.desc" title="描述（可选）" aria-label="描述" @keyup.enter="submit" />
 
-      <label>图标<span class="opt">（可选，留空自动抓取）</span></label>
-      <input v-model="form.icon" placeholder="emoji、文字或图片地址" @keyup.enter="submit" />
+      <input v-model="form.icon" title="图标（可选，留空自动抓取）" aria-label="图标" @keyup.enter="submit" />
 
       <p v-if="error" class="err">{{ error }}</p>
 
@@ -132,13 +129,9 @@ h3 { margin: 0 0 16px; font-size: 16px; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-label {
-  display: block;
-  margin: 12px 0 6px;
-  font-size: 12.5px;
-  color: var(--text-2);
-}
-.opt { color: var(--text-3); }
+/* label 去掉了，间距改由输入框自己撑 */
+.dialog select,
+.dialog input { margin-top: 10px; }
 .err { color: var(--danger); font-size: 13px; margin: 12px 0 0; }
 .foot { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
 @keyframes fade { from { opacity: 0 } }
