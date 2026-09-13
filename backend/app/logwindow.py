@@ -2,7 +2,6 @@
 
 为什么需要它：exe 是 windowed 打的（console=False，双击不弹 CMD 黑框），
 没有控制台就没地方看 uvicorn 的日志，这个窗口顶上——stdout/stderr 都被接进来。
-命令行子命令那半边怎么办见 [winconsole.py](winconsole.py)。
 
 Tk 只能在创建它的那个线程里调用，所以窗口跑在独立线程，别的线程一律通过队列投
 日志和命令。tkinter 缺失或非 Windows 时 start() 返回 False，服务照常跑，只是没窗口。
@@ -118,7 +117,7 @@ def _emit(text: str) -> None:
 def start() -> bool:
     """接管 stdout/stderr 并在后台线程建窗口。非 Windows / 没有 tkinter 返回 False。
 
-    必须在 import app.config 之前调用：conf.ini 不存在时 config 会直接 sys.exit，
+    必须在 import app.config 之前调用：conf.json 读不出来时 config 会直接 sys.exit，
     那句提示得能落进窗口里，不然双击的人只看到「闪一下什么都没有」。
     """
     global _started
@@ -352,8 +351,8 @@ def _ask_close_action(root) -> str:
              font=('Microsoft YaHei UI', 11, 'bold')).pack(anchor='w')
     tk.Label(
         body,
-        text='收进托盘：窗口隐藏，认证中心继续在后台跑，业务系统的单点登录不受影响。\n'
-             '退出程序：停掉认证中心，已接入的系统会登不进去。',
+        text='收进托盘：窗口隐藏，门户继续在后台跑，浏览器照样打得开。\n'
+             '退出程序：停掉门户，页面就打不开了。',
         justify='left',
         font=('Microsoft YaHei UI', 9),
     ).pack(anchor='w', pady=(8, 16))

@@ -7,7 +7,7 @@
 
 依赖 pystray + Pillow。这两个**不在** backend/requirements.txt 里——源码态
 `python -m app.main` 用不上它们，只有 pyinstaller.bat 打包前会装。所以这里所有
-import 都写在函数里，缺了就静默跳过，认证中心照常跑，只是没有托盘。
+import 都写在函数里，缺了就静默跳过，服务照常跑，只是没有托盘。
 
 图标就是门户网页的那个 favicon（webside/public/favicon.png 的指南针），exe 图标、
 托盘图标、运行窗口图标三处同一份，见 portal.spec。文件找不到时退回现画一个。
@@ -30,8 +30,8 @@ def icon_path(name: str = 'favicon.png') -> Path | None:
     """找门户图标文件。规矩和 config.DIST_DIR 一样：exe 同级的 webside 目录优先，
     没有才用打进 exe 的那份——换前端不用重新打包，图标跟着一起换。
 
-    这里**不 import app.config**：运行窗口得在 conf.ini 还没读之前就建起来，
-    而 config 一被 import，缺 conf.ini 时就直接 sys.exit 了。
+    这里**不 import app.config**：运行窗口得在 conf.json 还没读之前就建起来，
+    而 config 一被 import 就会去读文件，格式不对时直接 sys.exit。
     """
     candidates = []
     if getattr(sys, 'frozen', False):
@@ -160,7 +160,7 @@ def attach(server) -> bool:
     """把托盘和运行窗口接到 uvicorn 上。非冻结态 / 非 Windows 直接 no-op。
 
     server 是 uvicorn.Server：退出走 should_exit 优雅停机，而不是当场杀进程——
-    在途的 /sso/validate 得让它把票换完，否则业务系统那边会拿到半截失败。
+    在途的 PUT /api/nav 得让它把 conf.json 写完，否则会留下半份文件。
     """
     if not getattr(sys, 'frozen', False) or sys.platform != 'win32':
         return False

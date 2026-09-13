@@ -4,7 +4,7 @@ echo   Portal one-click build (PyInstaller)
 echo ========================================
 
 rem ===== Version (edit this on each release) =====
-set VERSION=v1.0.0
+set VERSION=v2.0.0
 
 rem ===== Optional conda env. Leave it empty to use the current python =====
 set CONDA_ENV=
@@ -40,7 +40,7 @@ if errorlevel 1 (
 )
 
 rem 后端依赖没装齐的话，PyInstaller 只会打出一个一启动就 ImportError 的 exe
-python -c "import fastapi, uvicorn, httpx, pymysql" >nul 2>&1
+python -c "import fastapi, uvicorn, httpx" >nul 2>&1
 if errorlevel 1 (
     echo Backend deps missing, installing from backend\requirements.txt ...
     python -m pip install -r "%ROOT%backend\requirements.txt"
@@ -48,8 +48,8 @@ if errorlevel 1 (
 )
 
 rem ===== Run window (tkinter) + tray icon (pystray/Pillow) =====
-rem Deliberately NOT in backendequirements.txt: the server itself does not
-rem need them, only the packaged desktop shell does (app\logwindow.py, app	ray.py).
+rem Deliberately NOT in backend requirements.txt: the server itself does not
+rem need them, only the packaged desktop shell does (logwindow.py, tray.py).
 python -c "import tkinter" >nul 2>&1
 if errorlevel 1 (
     echo ERROR: this Python has no tkinter, the run window cannot be bundled.
@@ -114,9 +114,9 @@ if not exist "%RELEASE%\Portal.exe" (
 rem ===== Release dir must contain Portal.exe and nothing else =====
 rem The integration doc under docs\ is NOT copied here on purpose - send it
 rem to the other team straight from the repo.
-rem conf.ini is not bundled and not copied from this machine either (the local
-rem one holds a real database password). Portal.exe writes a template next to
-rem itself on first run, then stops so somebody can fill it in.
+rem conf.json is not bundled and not copied from this machine either - it holds
+rem this install's password and nav data. Portal.exe creates it next to itself
+rem on first run and just keeps going; there is nothing to fill in.
 
 rem ===== 清理构建中间产物 =====
 if exist "%ROOT%build" rmdir /s /q "%ROOT%build"
@@ -127,23 +127,22 @@ echo   Build complete! Single file: %RELEASE%\Portal.exe
 echo ========================================
 dir /b "%RELEASE%"
 echo ----------------------------------------
-echo   1. Run Portal.exe once - it creates conf.ini next to itself and stops.
-echo   2. Fill in your MySQL host/user/password in conf.ini (the database and
-echo      tables are created automatically, no need to create them by hand).
-echo   3. Portal.exe init          - create the database and the first account
-echo   4. Portal.exe               - start the auth server, open http://localhost:9921
+echo   Just double-click Portal.exe. It creates conf.json next to itself - listen
+echo   host/port, the login user/password, and later your nav cards, all in there.
+echo   Then open http://localhost:9921 and log in as admin / admin.
 echo.
-echo   Account / client management uses the same exe:
-echo      Portal.exe users / adduser / passwd / clients / addclient / settings
+echo   [ACTION] Change the password: edit conf.json - auth.password - and restart.
+echo            Until you do, every startup prints a warning.
+echo.
+echo   Backup = copy conf.json. Restore = copy it back.
 echo.
 echo   Portal.exe is windowed: double-clicking opens a run window with live logs,
 echo   no CMD box. Clicking X asks "minimize to tray" or "quit"; the tray icon at
 echo   the bottom-right keeps it running in the background and reopens the window.
-echo   Subcommands run from a cmd window print into that same window (the prompt
-echo   comes back first, so output lands under it); password entry pops a dialog.
-echo.
 echo   The frontend is bundled inside Portal.exe. To swap it without rebuilding,
 echo   put a "webside" folder (the contents of webside\dist) next to Portal.exe.
-echo   Plain HTTP - put nginx in front for HTTPS, then: Portal.exe set cookie_secure true
+echo   Plain HTTP. Put nginx in front for HTTPS, then set cookie_secure = true in
+echo   conf.json - turning it on without HTTPS makes the browser drop the cookie,
+echo   which looks like "login succeeds then immediately logs out again".
 echo ========================================
 pause

@@ -1,20 +1,28 @@
-/** 登录状态。页面起来先问一次后端，之后由登录/登出维护。 */
+/**
+ * 登录状态。页面起来先问一次后端，之后由登录 / 登出维护。
+ *
+ * 只有一个账号，认的是后端 conf.json 里那对用户名口令，所以这里没有角色、
+ * 没有用户列表、也没有「改密码」——要改口令去编辑 conf.json 然后重启。
+ */
 import { reactive } from 'vue'
-import { api, OfflineError } from './api'
+import { api, OfflineError, setUnauthorizedHandler } from './api'
 
 export const auth = reactive({
-  user: null,        // { id, username, display_name, email, roles }
-  ready: false,      // 已经问过后端了，没问完之前别闪登录页
-  offline: false,    // 后端连不上
-  clients: []        // 已注册的业务系统，给卡片的下拉框用
+  user: null,              // { username } | null
+  ready: false,            // 已经问过后端了，没问完之前别闪登录页
+  offline: false,          // 后端连不上
+  defaultPassword: false   // 后端还在用默认口令，页面上提醒一句
 })
+
+function accept(data) {
+  auth.user = data.user
+  auth.defaultPassword = !!data.default_password
+  auth.offline = false
+}
 
 export async function refresh() {
   try {
-    const data = await api('/api/me')
-    auth.user = data.user
-    auth.offline = false
-    loadClients()
+    accept(await api('/api/me'))
   } catch (err) {
     auth.user = null
     auth.offline = err instanceof OfflineError
@@ -24,52 +32,20 @@ export async function refresh() {
 }
 
 export async function login(username, password) {
-  const data = await api('/api/login', { method: 'POST', body: { username, password } })
-  auth.user = data.user
-  auth.offline = false
-  loadClients()
-  return data.user
+  accept(await api('/api/login', { method: 'POST', body: { username, password } }))
+  return auth.user
 }
 
 export async function logout() {
   try {
     await api('/api/logout', { method: 'POST' })
   } finally {
-    auth.user = null
-    auth.clients = []
+    auth.user = null       // 请求失败也要退：Cookie 可能本来就已经不作数了
   }
 }
 
-/** 改自己的密码。不验原密码是刻意的，安全性压在会话 Cookie 上 */
-export async function changePassword(newPassword) {
-  await api('/api/password', { method: 'POST', body: { new_password: newPassword } })
-}
-
-/**
- * 改自己的资料。只传要改的字段。
- * 改名不掉线、导航也不丢——会话和 nav 表记的都是用户 id，不认用户名。
- */
-export async function updateProfile(payload) {
-  const data = await api('/api/profile', { method: 'PATCH', body: payload })
-  auth.user = data.user
-  return data.user
-}
-
-async function loadClients() {
-  try {
-    const data = await api('/api/sso/clients')
-    auth.clients = data.clients
-  } catch {
-    auth.clients = []   // 拿不到就退化成手填 client_id，不影响用
-  }
-}
-
-/**
- * 登录后要跳回的地址。
- * 只认站内路径：允许完整地址的话，这个参数就成了给钓鱼用的开放重定向。
- */
-export function safeNext(raw) {
-  const next = (raw || '').trim()
-  if (!next.startsWith('/') || next.startsWith('//')) return ''
-  return next
-}
+/* 会话过期时（后端回 401）把人退回登录页，别让他对着一个存不上的面板接着改。
+   注册在这里而不是 App.vue：store.js 里的自动保存也会撞上 401 */
+setUnauthorizedHandler(() => {
+  auth.user = null
+})

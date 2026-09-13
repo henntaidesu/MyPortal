@@ -1,9 +1,9 @@
 {
   "name": "portal",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
-  "description": "门户：统一的系统导航 + 单点登录",
+  "description": "门户：一个简单的导航页",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

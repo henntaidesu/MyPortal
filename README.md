@@ -1,148 +1,102 @@
-# 门户 Portal · 系统导航 + 单点登录
+# 门户 Portal · 一个简单的导航页
 
-把散落的各个系统入口收拢到一个页面，**登录一次，点卡片直接进系统，不用再登第二次**。
+把散落的各个系统入口收拢到一个页面：登录一次，点卡片就打开。
 
-前端 Vue 3 + Vite（9920），认证中心 FastAPI + MySQL（9921）。
+前端 Vue 3 + Vite（9920），后端 Python / FastAPI（9921）。
+**没有数据库**：配置和数据全在后端目录下的一个 `conf.json` 里。
 
 ```
 Portal/
-├── start.bat     双击启动（装依赖 + 建账号 + 起前后端 + 开浏览器）
+├── start.bat     双击启动（装依赖 + 起前后端 + 开浏览器）
 ├── webside/      前端导航页
-├── backend/      认证中心：用户、会话、票据
-└── docs/         给其他系统看的对接文档
+└── backend/      Python 后端：托管页面 + 登录 + 读写 conf.json + 代抓站点图标
 ```
-
-## 准备数据库
-
-认证中心用 MySQL。**库和表都在启动时自动建**，你只要有一个连得上的 MySQL 账号：
-
-```sql
-CREATE USER 'portal'@'%' IDENTIFIED BY '你的密码';
-GRANT ALL PRIVILEGES ON *.* TO 'portal'@'%';   -- 只要能建库即可，也可收窄
-```
-
-连接信息填在 `backend/conf.ini` 的 `[database]` 段。这个文件首次运行会自动生成，
-生成后程序会停下来让你去填——填完再跑一次就行。
-
-账号没有建库权限（生产上常见）也能跑，让 DBA 先建好同名空库就行：
-
-```sql
-CREATE DATABASE portal_sso DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
-GRANT ALL PRIVILEGES ON portal_sso.* TO 'portal'@'%';
-```
-
-> 密码不要用中文：MySQL 按 latin-1 传密码，非 latin-1 字符用不了。
 
 ## 启动
 
-双击 `start.bat`。第一次会装依赖、生成 `conf.ini`、建库建表，并建一个默认管理员：
-
-| 用户名 | 密码 |
-| --- | --- |
-| `admin` | `admin` |
-
-**登录后立刻改掉**：门户右上角齿轮旁边点自己的名字可以改密码，或者
-`cd backend && python manage.py passwd admin`。只要还是默认口令，
-命令行和服务启动都会一直警告——谁能打开这个门户，谁就能免登录进所有已接入的业务系统。
+双击 `start.bat`，第一次会自动装依赖。没有任何要预先填的东西——`conf.json`
+用到的时候自己生成，默认账号 **`admin` / `admin`**。
 
 手动启动是两个进程：
 
 ```bash
-# 认证中心
+# 后端
 cd backend
-pip install -r requirements.txt
-python manage.py init          # 只需第一次：建库建表 + 建默认管理员 admin/admin
-python -m app.main             # http://localhost:9921
+pip install -r requirements.txt   # 只需第一次：fastapi + uvicorn + httpx
+python -m app.main                # http://localhost:9921
 
 # 前端（另开一个窗口）
 cd webside
-npm install                    # 只需第一次
-npm run dev                    # http://localhost:9920
+npm install                       # 只需第一次
+npm run dev                       # http://localhost:9920
 ```
 
-前端的 `/api` 和 `/sso` 会代理到 9921，浏览器看到的是同源，不用配 CORS。
+前端的 `/api` 会代理到 9921，浏览器看到的是同源，不用配 CORS。
 
-## 单点登录是怎么跑的
-
-门户和业务系统不在同一个域名下，Cookie 带不过去，所以走一次性票据：
-
-```
-点卡片 → 认证中心签一张 60 秒、只能用一次的票 → 带票跳到你的系统
-      → 你的系统后端拿票去换用户信息 → 建自己的会话 → 进系统
-```
-
-URL 里只出现那张票，真正的身份数据走服务端到服务端的请求，浏览器碰不到。
-
-**接你自己的系统**看 [docs/对接文档.md](docs/对接文档.md)，那份可以直接发给对方开发者。
-大致三步：
-
-```bash
-# 1. 注册你的系统，拿到 client_id 和 client_secret
-cd backend
-python manage.py addclient crm --name "客户管理系统" \
-    --redirect-uri http://192.168.1.20:8080/sso/callback \
-    --logout-uri  http://192.168.1.20:8080/sso/logout-notify \
-    --home-url    http://192.168.1.20:8080/
-
-# 2. 在你的系统里写两个接口：
-#    /sso/callback       拿 ticket → POST 认证中心 /sso/validate → 建本地会话
-#    /sso/logout-notify  收到通知就销毁对应的本地会话（可选）
-
-# 3. 在门户给这张卡片的「免登录跳转」选上它
-```
-
-## 账号管理
-
-都在 `backend` 目录：
-
-```bash
-python manage.py users                      # 看有哪些人
-python manage.py adduser lisi --name 李四    # 加人（密码交互输入）
-python manage.py passwd lisi                # 改密码
-python manage.py disable lisi               # 停用，顺手把在线会话踢掉
-python manage.py clients                    # 看注册了哪些系统
-python manage.py addclient / delclient      # 加减系统
-```
-
-密码用标准库 scrypt 加盐哈希，会话令牌只在库里存 sha256 指纹，
-库被看到也换不回可用的 Cookie。
+> **登录后马上改口令**：编辑 `backend/conf.json` 的 `auth.password`，然后重启。
+> 只要还是默认口令，每次启动都会警告，页面上也会顶一条提示。
 
 ## 用法
 
-- 右上角 **⚙** 打开系统设置，改会话时长、票据时长、登录限流这些（只有 admin 看得见，
-  改完最多 5 秒生效不用重启）；数据库连接不在这里，它在 `backend/conf.ini`，改完要重启
-- 点面板里虚线的 **＋ 添加导航** 卡片新增
+- 导航按**分类**组织，一个分类画成一张大卡，底部虚线的 **＋ 新建分类** 加一个
+- 分类名直接点着改；分类右上角 `＋` 往里加导航、`✕` 删掉整个分类（连里面的导航一起）
 - 鼠标移到卡片上 → `✎` 编辑、`✕` 删除
-- 直接拖动卡片调整顺序
-- 右上角搜索框过滤，🌗 切换 跟随系统 / 浅色 / 深色，最右边点名字退出登录
+- 拖卡片调顺序，**拖到别的分类上就换分类了**；拖分类左边的 `⠿` 把手调分类顺序
+- 编辑卡片时也可以在「分类」下拉框里直接换分类
+- 右上角搜索框过滤，🌗 切换 跟随系统 / 浅色 / 深色，最右边点用户名退出登录
 - 标题「我的门户」可以直接点击改名
 - 地址不用写 `http://`，粘 `192.168.1.10:8080` 也行
 - 图标留空会自动抓站点图标，抓不到就显示彩色文字徽标；也可以填 emoji、文字或图片地址
-- 编辑卡片时选上「免登录跳转」，卡片会带一个 `免登录` 角标，点开直接进系统
-- 底部「导出备份 / 导入备份」迁移数据
+- 底部「导出备份 / 导入备份」搬数据
 
-## 数据
+## conf.json
 
-- **账号、会话、票据、业务系统注册表、运行期配置**：MySQL，连接信息在 `backend/conf.ini`
-  （六张表：`users` `sessions` `tickets` `session_clients` `clients` `settings`）
-- **导航内容**：浏览器 `localStorage`，按登录用户分开存（`portal-nav:<用户名>`）
-
-导航数据目前还是存在浏览器本地的，也就是说同一个人换台机器要重新配一遍。
-想搬到后端的话，只改 [webside/src/store.js](webside/src/store.js) 里的 `read()` / `write()`
-两个函数就够了，其余代码不用动。数据结构是一个扁平列表：
+配置和数据在同一个文件里（打包成 exe 后是 exe 同级的 `conf.json`）。
+**备份就是拷走它，恢复就是拷回去。** 也可以直接用记事本改：
 
 ```json
 {
-  "title": "我的门户",
-  "theme": "auto",
-  "items": [
-    { "id": "x1", "name": "客户管理", "url": "http://192.168.1.20:8080",
-      "desc": "CRM", "icon": "", "sso": "crm" }
-  ]
+  "server": { "host": "0.0.0.0", "port": 9921 },
+  "auth": {
+    "username": "admin",
+    "password": "改成你自己的",
+    "session_hours": 168,
+    "cookie_secure": false
+  },
+  "nav": {
+    "title": "我的门户",
+    "theme": "auto",
+    "groups": [
+      {
+        "id": "g1",
+        "name": "业务系统",
+        "items": [
+          { "id": "x1", "name": "客户管理", "url": "http://192.168.1.20:8080",
+            "desc": "CRM", "icon": "" }
+        ]
+      }
+    ]
+  }
 }
 ```
 
-`sso` 填的是业务系统的 `client_id`，留空就是普通跳转。
+- `server` 和 `auth` 启动时读一次，**改完要重启**；`nav` 是页面上随手在改的，
+  存的时候只换 `nav` 那一段，服务跑着的时候手改口令也不会被盖掉。
+- **改口令会让所有已登录的浏览器一起掉线**：会话 Cookie 的签名密钥是从口令算出来的。
+  想把所有设备踢下线，改一下口令就行。
+- **`cookie_secure` 只有 https 部署才能开。** http 下开了浏览器会直接丢掉登录 Cookie，
+  表现成「登录成功后立刻又变回未登录」。
+- 口令是明文存的，所以这个文件在 .gitignore 里，别随手发给别人。
+- 老版本留下的 `conf.ini` / `nav.json` 首次启动会被自动折进 `conf.json`，
+  确认没问题之后可以删掉。
+
+浏览器的 `localStorage` 里还有一份导航，但那只是缓存：进页面先拿它画一屏不用等接口，
+后端连不上时也照常能看能改，改动攒着，下次连上自动补传（页面底部会显示
+「连不上后端，改动暂时只存在本机」）。两个浏览器同时改的话，后按下的那边赢。
+
+分类是后加的：`nav` 里如果是老的扁平 `items` 列表，第一次打开会自动收进一个默认分类。
+
+站点图标缓存在 `backend/icons/` 目录里，**整个删掉也没事**，下次访问会自己重建重抓。
 
 ## 部署
 
@@ -153,65 +107,56 @@ cd ../backend
 python -m app.main       # 后端顺带把 dist 托出去，同源，不用配 CORS
 ```
 
-前面挂 Nginx 的话，把 `/`、`/api`、`/sso` 都反代到后端即可。
-**门户必须挂在域名根路径下**（卡片跳的是绝对路径 `/sso/authorize`），
-挂子路径要自己改 [webside/src/components/NavCard.vue](webside/src/components/NavCard.vue) 里的 `href`。
-
-上了 https 记得开 `cookie_secure`：门户右上角齿轮 → 系统设置，或者
-`cd backend && python manage.py set cookie_secure true`；
-反过来，http 环境下开了它，浏览器会直接丢掉登录 Cookie。
+前面挂 Nginx 的话，把 `/` 和 `/api` 都反代到后端即可。
+上了 https 记得把 `conf.json` 的 `cookie_secure` 改成 `true`。
 
 ### 打包成一个 exe
 
 目标机器不想装 Python 和 Node 的话，在仓库根目录双击 `pyinstaller.bat`，
-产物是 `Releases\<版本>\Portal.exe` 一个文件（前端已经打在里面）：
+产物是 `Releases\<版本>\Portal.exe` 一个文件（前端已经打在里面）。
 
-```
-Portal.exe              第一次运行：在自己旁边生成 conf.ini，填好 [database] 再来
-Portal.exe init         建库 + 建表 + 建默认管理员 admin/admin
-Portal.exe              起认证中心
-Portal.exe users / adduser / clients / addclient / settings / set …
-```
+双击就能跑，没有子命令：它会在自己旁边生成 `conf.json` 和 `icons/`，
+打开 http://localhost:9921 用 `admin` / `admin` 登录，然后去 `conf.json` 改口令。
 
-子命令和 `manage.py` 完全一样，只是把 `python manage.py` 换成 `Portal.exe`。
-要换前端而不想重新打包，把 `webside/dist` 的内容放到 exe 同级的 `webside` 目录即可。
+exe 是 windowed 打的：双击不弹 CMD 黑框，起来的是一个运行窗口实时显示日志，
+点 X 可以收进托盘继续在后台跑。要换前端而不想重新打包，把 `webside/dist`
+的内容放到 exe 同级的 `webside` 目录即可。
 
 ## 文件
 
 ```
 webside/src/
-├── App.vue                 未登录显示登录页，登录后是导航面板
+├── App.vue                 导航面板（搜索、分类列表、导入导出）
 ├── api.js                  跟后端说话的统一出口
 ├── auth.js                 登录状态
-├── store.js                导航数据 + 增删改查 + 持久化（换后端只改这里）
-├── utils.js                URL 补全、图标解析、配色
-├── icons.js                图标抓取与缓存
+├── store.js                导航数据 + 增删改查 + 同步（换存储只改这里）
+├── drag.js                 拖拽状态（拖卡片、拖分类）
+├── utils.js                URL 补全、配色、备份下载
+├── icons.js                拼 /api/icon 的地址
 ├── styles.css              主题变量
 └── components/
     ├── LoginView.vue       登录页
-    ├── SettingsDialog.vue  系统设置（admin 可见）
-    ├── NavCard.vue         导航卡片（免登录跳转在这里拼 URL）
+    ├── NavGroup.vue        一个分类 = 一张大卡
+    ├── NavCard.vue         导航卡片
     ├── NavIcon.vue         图标（favicon / emoji / 文字徽标）
     └── CardDialog.vue      添加、编辑弹窗
 
 backend/
-├── main.py                 打包后的 exe 入口（无参起服务，带参走 manage 的子命令）
-├── manage.py               命令行：建用户、改密码、注册业务系统、改配置
-├── conf.ini                数据库连接 + 监听端口（首次运行自动生成，不进版本库）
+├── main.py                 打包后的 exe 入口（开发时用不着）
+├── conf.json               配置 + 导航数据（首次运行自动生成，不进版本库）
 └── app/
     ├── main.py             组装路由 + 托管 dist
-    ├── config.py           读 conf.ini（只有启动必须的那几项）
-    ├── settings.py         运行期配置，存数据库，改完不用重启
-    ├── db.py               MySQL 连接池 + 建库建表 + 用户/会话/票据存储
-    ├── security.py         scrypt 哈希、随机令牌
-    ├── clients.py          业务系统注册表（读写 MySQL，带 5 秒缓存）
-    ├── deps.py             会话 Cookie、登录限流
-    ├── notify.py           单点登出通知
+    ├── config.py           conf.json 的读写，算各种路径
+    ├── auth.py             登录校验、签名 Cookie、失败限流
+    ├── navstore.py         conf.json 里 nav 那一段的读写与校验
     ├── icon.py             站点图标代理
+    ├── iconcache.py        图标的磁盘缓存
+    ├── logwindow.py        打包后的运行窗口
+    ├── tray.py             打包后的托盘图标
     └── routers/
         ├── auth.py         /api/login /api/me /api/logout
-        └── sso.py          /sso/authorize /sso/validate /sso/logout
+        └── nav.py          /api/nav 的 GET / PUT
 
 pyinstaller.bat             打包：构建前端 + 打出单文件 Portal.exe
-portal.spec                 PyInstaller 配置（前端打进 exe、conf.ini 留在外面）
+portal.spec                 PyInstaller 配置（前端打进 exe，conf.json 留在外面）
 ```

@@ -1,21 +1,20 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec —— 门户 Portal 认证中心（FastAPI + uvicorn，同端口提供接口和前端）。
+"""PyInstaller spec —— 门户 Portal（FastAPI + uvicorn，同端口提供接口和前端）。
 
 产物是单文件 Portal.exe，**windowed（console=False）**：双击不弹 CMD 黑框，
 日志看运行窗口（app/logwindow.py），点 X 可以收进托盘后台跑（app/tray.py）。
 
-本来更想用 console=True + hide_console='hide-early'，那样命令行那半边一点不用改。
-但 Win11 默认终端换成 Windows Terminal 之后 hide_console 是空转的：它靠
-ShowWindow(GetConsoleWindow()) 藏窗口，而那个句柄是代理窗口，藏了屏幕上的黑框照样在
-（实测全程挂着）。所以只能 windowed，代价是子命令那边要自己去借控制台，
-见 app/winconsole.py。
+本来更想用 console=True + hide_console='hide-early'。但 Win11 默认终端换成
+Windows Terminal 之后 hide_console 是空转的：它靠 ShowWindow(GetConsoleWindow())
+藏窗口，而那个句柄是代理窗口，藏了屏幕上的黑框照样在（实测全程挂着）。所以只能 windowed。
 
-两件和路径有关、改之前要想清楚的事（对应 backend/app/config.py 里的 FROZEN 分支）：
+三件和路径有关、改之前要想清楚的事（对应 backend/app/config.py 里的 FROZEN 分支）：
 
 1. 前端 webside/dist 打进 exe，运行时解压在 _MEIPASS/webside。
    exe 同级放一个 webside 目录就能盖掉它，换前端不用重新打包。
-2. conf.ini 不打进来。它必须待在 exe 同级目录，打进去的话每次启动都会被
-   临时解压目录里的那份盖掉，改了密码等于白改。
+2. conf.json 不打进来。它必须待在 exe 同级目录：打进去的话每次启动都会被
+   临时解压目录里的那份盖掉，改了口令、加了卡片全白改；而且登录口令会跟着 exe
+   一起发出去。它同时是用户的全部数据，更不能进 exe。
 """
 import os
 
@@ -49,16 +48,15 @@ hiddenimports = [
     'websockets',
 
     # 后端自己的模块。显式列出来而不是 collect_submodules('app')：后者打包时会
-    # 真的 import 一遍 app.config，而它读不到 conf.ini 就直接 sys.exit，
-    # 构建会挂在一句莫名其妙的「先去填数据库密码」上。
-    'app', 'app.main', 'app.config', 'app.db', 'app.settings', 'app.security',
-    'app.clients', 'app.deps', 'app.notify', 'app.icon',
-    'app.routers', 'app.routers.auth', 'app.routers.sso', 'app.routers.admin',
-    'app.logwindow', 'app.tray', 'app.winconsole',   # 桌面外壳，见下面那段
-    'manage',            # 无参起服务，带参走 manage.run()，见 backend/main.py
+    # 真的 import 一遍每个模块，副作用（比如 app.config 生成 conf.json）会落到
+    # 构建机器上，而不是跑 exe 的那台。
+    'app', 'app.main', 'app.config', 'app.auth', 'app.navstore',
+    'app.icon', 'app.iconcache',
+    'app.routers', 'app.routers.auth', 'app.routers.nav',
+    'app.logwindow', 'app.tray',     # 桌面外壳，见下面那段
 ]
 
-# 桌面外壳（app/logwindow.py / app/tray.py / app/winconsole.py）的依赖。它们的
+# 桌面外壳（app/logwindow.py / app/tray.py）的依赖。它们的
 # import 全写在函数里——源码态起服务不该为了一个托盘图标去装 pystray——静态分析
 # 看不见，得显式列。tkinter 还要靠自带的 hook 把 tcl/tk 那堆运行时文件一起带上。
 hiddenimports += [
@@ -81,8 +79,8 @@ if os.path.isdir(WEBSIDE_DIST):
     # favicon.png / favicon.ico 就在 public/ 里，跟着 dist 一起进来了，
     # 托盘和运行窗口运行时从 webside/favicon.png 读，见 app/tray.py 的 icon_path
 else:
-    # 直接失败，不能只警告：少了前端的 exe 一样能跑起来、一样能登录，
-    # 只是打开首页是一片「前端还没打包」，到现场才发现就晚了
+    # 直接失败，不能只警告：少了前端的 exe 一样能跑起来，只是打开首页是一片
+    # 「前端还没打包」，到现场才发现就晚了
     raise SystemExit(f'[portal.spec] 没找到 {WEBSIDE_DIST}，先在 webside 目录执行 npm run build')
 
 
@@ -137,8 +135,7 @@ exe = EXE(
     upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
-    # 无控制台：双击不弹黑框。子命令从 cmd 里调起来时自己 AttachConsole
-    # 借调用方的控制台，见 app/winconsole.py——别为了省那一步改回 console=True，
+    # 无控制台：双击不弹黑框。别改回 console=True——
     # 上面文档里写了 hide_console 在 Win11 上为什么救不了场。
     console=False,
     icon=icon_arg,      # 门户网页的 favicon，见上面 ICON_ICO

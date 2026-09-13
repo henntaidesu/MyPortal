@@ -14,6 +14,12 @@ export class OfflineError extends Error {
   }
 }
 
+/* 会话过期时谁来管。由 auth.js 注册进来——反过来让 api.js import auth.js 会成环 */
+let onUnauthorized = () => {}
+export function setUnauthorizedHandler(fn) {
+  onUnauthorized = fn
+}
+
 export async function api(path, { method = 'GET', body } = {}) {
   let res
   try {
@@ -31,6 +37,9 @@ export async function api(path, { method = 'GET', body } = {}) {
 
   const data = await res.json().catch(() => ({}))
   if (!res.ok) {
+    // Cookie 过期或被换掉了。/api/me 不会走到这里（它没登录也返回 200），
+    // 所以 401 一定是「本来登着、现在不算数了」，直接把人退回登录页
+    if (res.status === 401) onUnauthorized()
     throw new ApiError(data.detail || `请求失败（${res.status}）`, res.status)
   }
   return data

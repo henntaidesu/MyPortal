@@ -1,7 +1,11 @@
-"""认证中心 + 门户静态站点。
+"""门户 Portal：导航接口 + 静态站点。
 
 开发时前端跑 vite(9920)，接口由 vite 代理到这里(9921)。
 部署时先 npm run build，这个进程直接把 webside/dist 托出去，同源、不用配 CORS。
+
+没有数据库：导航数据是一个 JSON 文件（app/navstore.py），
+图标缓存是一个磁盘目录（app/iconcache.py），登录认的是 conf.json 里那对用户名口令
+（app/auth.py，签名 Cookie，服务端不存会话）。
 """
 import asyncio
 import contextlib
@@ -11,14 +15,11 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import clients, db, iconcache
-from .config import DIST_DIR, HOST, PORT
+from . import iconcache, navstore
+from .config import AUTH_USERNAME, CONF_PATH, DIST_DIR, HOST, PORT, uses_default_password
 from .icon import router as icon_router
-from .routers.admin import router as admin_router
 from .routers.auth import router as auth_router
 from .routers.nav import router as nav_router
-from .routers.sso import router as sso_router
-from .routers.users import router as users_router
 
 PURGE_INTERVAL = 3600
 
@@ -26,23 +27,19 @@ PURGE_INTERVAL = 3600
 async def _purge_loop() -> None:
     while True:
         await asyncio.sleep(PURGE_INTERVAL)
-        await asyncio.to_thread(db.purge_expired)
-        await asyncio.to_thread(iconcache.purge)   # 顺手把过期的图标缓存删了
+        await asyncio.to_thread(iconcache.purge)   # 过期的图标缓存清一清
 
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    db.init_db()
-    db.purge_expired()
     iconcache.ensure()          # 图标缓存目录，没有就建
     iconcache.purge()
-    registered = clients.load(force=True)
-    print(f'[sso] 数据库 {db.describe()}')
-    print(f'[sso] 图标缓存 {iconcache.describe()}')
-    print(f'[sso] 已注册业务系统 {len(registered)} 个: {", ".join(registered) or "(无)"}')
-    if db.uses_default_password():
-        print(f'[sso] !! 账号 {db.DEFAULT_ADMIN} 还在用默认口令，'
-              f'改掉：python manage.py passwd {db.DEFAULT_ADMIN}')
+    print(f'[portal] 导航数据 {navstore.describe()}')
+    print(f'[portal] 图标缓存 {iconcache.describe()}')
+    if uses_default_password():
+        # 故意每次启动都喊。谁能打开这个门户，谁就能改掉这一页所有人的入口
+        print(f'[portal] !! 账号 {AUTH_USERNAME} 还在用默认口令，'
+              f'改掉：编辑 {CONF_PATH} 里的 auth.password，然后重启')
     task = asyncio.create_task(_purge_loop())
     try:
         yield
@@ -52,13 +49,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await task
 
 
-app = FastAPI(title='Portal SSO', version='1.0.0', lifespan=lifespan)
+app = FastAPI(title='Portal', version='2.0.0', lifespan=lifespan)
 
 app.include_router(auth_router)
-app.include_router(sso_router)
 app.include_router(icon_router)
-app.include_router(admin_router)
-app.include_router(users_router)
 app.include_router(nav_router)
 
 
@@ -67,7 +61,8 @@ def healthz():
     return {'ok': True}
 
 
-# 静态站点挂在最后：前面的接口路由先匹配，剩下的才交给它
+# 静态站点挂在最后：前面的接口路由先匹配，剩下的才交给它。
+# 新增路由必须在这行 mount 之前 include，而且前缀要落在 /api 下，否则 dev 时 vite 代理不到。
 if DIST_DIR.is_dir():
     app.mount('/', StaticFiles(directory=DIST_DIR, html=True), name='portal')
 else:
@@ -84,12 +79,6 @@ else:
 
 def main() -> None:
     import uvicorn
-    try:
-        # 先探一下数据库。不然连不上时 uvicorn 会把 starlette 的 traceback
-        # 整页糊在屏幕上，真正有用的那句提示反而被埋了
-        db.init_db()
-    except db.DatabaseUnavailable as exc:
-        raise SystemExit(f'[数据库] {exc}')
 
     # 不用 uvicorn.run()：托盘的「退出程序」要拿到 Server 对象才能设 should_exit。
     # timeout_graceful_shutdown 是兜底上限，免得哪个连接一直不断开就永远停不下来。

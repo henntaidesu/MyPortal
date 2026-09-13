@@ -4,7 +4,10 @@ cd /d "%~dp0"
 
 rem ============================================================
 rem  9920  portal frontend (vite)
-rem  9921  auth server (FastAPI); the frontend proxies /api and /sso to it
+rem  9921  python backend (FastAPI); the frontend proxies /api to it
+rem
+rem  No database. One file holds everything: backend\conf.json - listen
+rem  host/port, the login user/password, and the nav cards themselves.
 rem
 rem  ASCII ONLY in this file. cmd.exe parses .bat with the system ANSI codepage
 rem  (936 here), so UTF-8 Chinese gets mis-paired byte by byte and part of a
@@ -62,7 +65,7 @@ if not exist "webside\node_modules" (
 )
 
 rem ---------- backend dependencies ----------
-%PY% -c "import fastapi, uvicorn, httpx, pymysql" >nul 2>nul
+%PY% -c "import fastapi, uvicorn, httpx" >nul 2>nul
 if errorlevel 1 (
     echo First run - installing backend dependencies, please wait...
     %PY% -m pip install -r backend\requirements.txt
@@ -73,42 +76,12 @@ if errorlevel 1 (
     )
 )
 
-rem ---------- first run: generate conf.ini, then let the user fill in MySQL ----------
-if not exist "backend\conf.ini" (
-    echo.
-    echo   First run - creating backend\conf.ini ...
-    echo.
-    pushd backend
-    %PY% manage.py init
-    popd
-    echo.
-    echo   [ACTION] Now edit backend\conf.ini, fill in your MySQL settings,
-    echo            then run start.bat again. The database and tables are
-    echo            created automatically on startup.
-    echo.
-    pause
-    exit /b 1
-)
-
-rem ---------- create tables + first account (skipped when they already exist) ----------
-pushd backend
-%PY% manage.py init
-set "INITRC=%ERRORLEVEL%"
-popd
-if not "%INITRC%"=="0" (
-    echo.
-    echo   [ERROR] Database is not ready. See the message above,
-    echo           then check [database] in backend\conf.ini.
-    echo.
-    pause
-    exit /b 1
-)
-
 rem ---------- start the backend ----------
 rem  /B keeps it inside THIS console instead of opening a second window:
 rem  both servers log here, and closing this window stops both of them.
+rem  conf.json is created on first run - nothing to set up beforehand.
 echo.
-echo   Starting auth server on port 9921...
+echo   Starting backend on port 9921...
 start "" /D "%~dp0backend" /B %PY% -m app.main
 "%SystemRoot%\System32\ping.exe" -n 4 127.0.0.1 >nul
 
@@ -116,8 +89,8 @@ set "BACKPID="
 for /f "tokens=5" %%p in ('netstat -ano ^| findstr /r /c:"TCP .*:9921 .*LISTENING"') do set "BACKPID=%%p"
 if not defined BACKPID (
     echo.
-    echo   [WARN] Auth server is not listening on 9921.
-    echo          The nav page will open but login will fail.
+    echo   [WARN] Backend is not listening on 9921.
+    echo          The nav page will open but it cannot save.
     echo          Run it by hand to see the error:
     echo              cd backend ^&^& %PY% -m app.main
     echo.
@@ -128,6 +101,8 @@ rem ---------- start the frontend ----------
 echo.
 echo   Portal:    http://localhost:9920
 echo   LAN:       see the Network address printed below
+echo   Login:     admin / admin on first run - see backend\conf.json
+echo   All data:  backend\conf.json
 echo   Both servers log into this window - close it to stop both.
 echo.
 
@@ -137,7 +112,7 @@ popd
 
 rem ---------- frontend exited: shut the backend down too ----------
 echo.
-echo Stopping auth server...
+echo Stopping backend...
 for /f "tokens=5" %%p in ('netstat -ano ^| findstr /r /c:"TCP .*:9921 .*LISTENING"') do taskkill /PID %%p /F >nul 2>nul
 echo Server stopped.
 pause

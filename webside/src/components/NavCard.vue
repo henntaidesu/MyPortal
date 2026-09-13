@@ -7,25 +7,14 @@ const props = defineProps({ item: { type: Object, required: true } })
 const emit = defineEmits(['edit', 'remove'])
 
 const host = computed(() => getHost(props.item.url))
-
-/**
- * 配了 sso 就不直接跳系统地址，而是先经认证中心换一张一次性票据，
- * 由系统自己拿票换身份、建本地会话，用户那边就是「点一下直接进去」。
- */
-const href = computed(() =>
-  props.item.sso
-    ? '/sso/authorize?client_id=' + encodeURIComponent(props.item.sso)
-    : props.item.url
-)
 </script>
 
 <template>
-  <a class="card" :href="href" target="_blank" rel="noopener" :title="item.url">
+  <a class="card" :href="item.url" target="_blank" rel="noopener" :title="item.url">
     <NavIcon :item="item" :size="52" />
     <div class="meta">
       <div class="name">
         <span class="txt">{{ item.name }}</span>
-        <span v-if="item.sso" class="badge" title="已接单点登录，点开不用再输账号">免登录</span>
       </div>
       <div class="desc">{{ item.desc || host }}</div>
     </div>
@@ -64,16 +53,6 @@ const href = computed(() =>
   white-space: nowrap;
 }
 .txt { overflow: hidden; text-overflow: ellipsis; }
-.badge {
-  flex: none;
-  padding: 1px 6px;
-  border-radius: 5px;
-  font-size: 10.5px;
-  font-weight: 500;
-  letter-spacing: .3px;
-  color: var(--primary);
-  background: color-mix(in srgb, var(--primary) 13%, transparent);
-}
 .desc {
   margin-top: 5px;
   color: var(--text-3);

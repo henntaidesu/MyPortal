@@ -9,8 +9,7 @@ import { getOrigin } from './utils'
  * 不会每开一次门户就白跑一趟外网。
  */
 
-/* 这份缓存原来在 localStorage 里，搬到后端了。把浏览器里那两份旧的清掉，
-   一来腾出配额，二来消掉「同一台机器换人登录会继承上一个人图标缓存」那点残留 */
+/* 这份缓存原来在 localStorage 里，搬到后端了。把浏览器里那两份旧的清掉，腾出配额 */
 for (const stale of ['portal-nav-icons', 'home-nav-icons']) {
   try { localStorage.removeItem(stale) } catch { /* 不成也无所谓 */ }
 }

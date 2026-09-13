@@ -1,11 +1,14 @@
 <script setup>
 import { reactive, ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import NavIcon from './NavIcon.vue'
-import { addItem, updateItem } from '../store'
-import { auth } from '../auth'
+import { state, addItem, updateItem } from '../store'
 import { getHost, normalizeUrl } from '../utils'
 
-const props = defineProps({ item: { type: Object, default: null } })
+const props = defineProps({
+  /** 这张卡片所在（或将要加进）的分类 */
+  group: { type: Object, required: true },
+  item: { type: Object, default: null }
+})
 const emit = defineEmits(['close'])
 
 const isEdit = computed(() => !!props.item)
@@ -14,17 +17,9 @@ const form = reactive({
   url: props.item?.url || '',
   desc: props.item?.desc || '',
   icon: props.item?.icon || '',
-  sso: props.item?.sso || ''
+  group: props.group.id          // 改成别的分类就等于把这张卡片搬过去
 })
 
-/** 已注册的业务系统。卡片上原本配的那个即使被从注册表里删了也留在列表里，免得静悄悄丢掉 */
-const ssoOptions = computed(() => {
-  const list = auth.clients.map((c) => ({ id: c.client_id, label: `${c.name}（${c.client_id}）` }))
-  if (form.sso && !list.some((o) => o.id === form.sso)) {
-    list.unshift({ id: form.sso, label: `${form.sso}（已不在注册表里）` })
-  }
-  return list
-})
 const error = ref('')
 const nameInput = ref(null)
 
@@ -36,8 +31,8 @@ watch(() => form.url, (v) => {
 function submit() {
   if (!form.name.trim()) return (error.value = '请填写名称')
   if (!form.url.trim()) return (error.value = '请填写地址')
-  if (isEdit.value) updateItem(props.item.id, form)
-  else addItem(form)
+  if (isEdit.value) updateItem(props.group.id, props.item.id, form)
+  else addItem(form.group, form)
   emit('close')
 }
 
@@ -64,6 +59,11 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
         </div>
       </div>
 
+      <label>分类</label>
+      <select v-model="form.group">
+        <option v-for="g in state.groups" :key="g.id" :value="g.id">{{ g.name }}</option>
+      </select>
+
       <label>名称</label>
       <input ref="nameInput" v-model="form.name" placeholder="例如：运维监控" @keyup.enter="submit" />
 
@@ -75,21 +75,6 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 
       <label>图标<span class="opt">（可选，留空自动抓取）</span></label>
       <input v-model="form.icon" placeholder="emoji、文字或图片地址" @keyup.enter="submit" />
-
-      <label>免登录跳转<span class="opt">（可选）</span></label>
-      <select v-model="form.sso">
-        <option value="">不启用，直接打开上面的地址</option>
-        <option v-for="o in ssoOptions" :key="o.id" :value="o.id">{{ o.label }}</option>
-      </select>
-      <p class="tip">
-        <template v-if="ssoOptions.length">
-          选中后，点这张卡片会先经认证中心换票，进系统时不用再输账号。
-        </template>
-        <template v-else>
-          还没注册业务系统。在 backend 目录执行
-          <code>python manage.py addclient &lt;id&gt; --redirect-uri &lt;回调地址&gt;</code>
-        </template>
-      </p>
 
       <p v-if="error" class="err">{{ error }}</p>
 
@@ -154,18 +139,6 @@ label {
   color: var(--text-2);
 }
 .opt { color: var(--text-3); }
-.tip {
-  margin: 7px 0 0;
-  color: var(--text-3);
-  font-size: 11.5px;
-  line-height: 1.7;
-}
-.tip code {
-  background: var(--surface-2);
-  border-radius: 4px;
-  padding: 1px 5px;
-  word-break: break-all;
-}
 .err { color: var(--danger); font-size: 13px; margin: 12px 0 0; }
 .foot { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
 @keyframes fade { from { opacity: 0 } }

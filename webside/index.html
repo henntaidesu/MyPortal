@@ -11,7 +11,8 @@
     <script>
       // 首屏前应用主题，避免闪白
       try {
-        // 主题单独存一份，不在按用户分开存的那份数据里；home-nav-theme 是改名前的老键
+        // 主题单独存一份，不在导航数据里：Vue 起来之前就要用上它；
+        // home-nav-theme 是改名前的老键
         const theme = localStorage.getItem('portal-nav-theme') ||
           localStorage.getItem('home-nav-theme') || 'auto'
         const dark = theme === 'dark' || (theme !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches)

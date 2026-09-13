@@ -9,17 +9,23 @@
 
 取到的图（和「取不到」这件事）都落在磁盘上，见 app/iconcache.py。
 所以同一个站点全公司只去外网抓一次，前端不用再自己缓存。
+
+**要求登录**：这个接口会替调用方发一次 HTTP 请求，不该对匿名访问者开放。
+登录之后它也不拦内网地址——真拦了就取不回 192.168.x.x 那些系统的 favicon，
+而门户存在的意义正是指向那些地址。剩下的限制只有：只认 http/https、
+只收 512 KB 以内且确实是图片的响应、6 秒超时。
 """
 import re
 from urllib.parse import urljoin, urlparse
 
 import httpx
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Response
 
 from . import iconcache
-from .deps import current_session
+from .auth import require_login
 
-router = APIRouter(prefix='/api', tags=['icon'])
+router = APIRouter(prefix='/api', tags=['icon'],
+                   dependencies=[Depends(require_login)])
 
 _MAGIC = (
     b'\x00\x00\x01\x00',      # ico
@@ -113,10 +119,7 @@ def _image(data: bytes, ctype: str) -> Response:
 
 
 @router.get('/icon')
-async def icon(request: Request, url: str = '', site: str = ''):
-    # 要求登录：这个接口会替调用方发请求，不该对匿名访问者开放
-    if current_session(request) is None:
-        raise HTTPException(401, '未登录')
+async def icon(url: str = '', site: str = ''):
     if not url and not site:
         raise HTTPException(400, 'url 或 site 至少给一个')
 
