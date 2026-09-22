@@ -23,9 +23,31 @@
     DOMAINS      tuple[str]   认领哪些卡片（域名后缀，子域算数）
     HOSTS        tuple[str]   这个站还要一起代理的域名后缀
     BROWSER_JS   str          追加到注入脚本末尾的 JS（能用 window.__portal）
+    REWRITE_JS   bool         默认 True；False = 不改这个站 JS/JSON 里的地址（见下）
     on_request(ctx, headers)   就地改发给上游的首部（list[tuple[str, str]]）
     on_response(ctx, headers)  就地改带回浏览器的首部（list[tuple[bytes, bytes]]）
     on_html(ctx, text) -> str  通用改写之后再过一道正文
+
+## REWRITE_JS：什么时候该关
+
+改写分两种，性质完全不同：
+
+- **HTML / CSS 里的地址**：浏览器解析到就直接拿去发请求了，注入的脚本插不上手，
+  所以这一道非改不可，`REWRITE_JS` 也管不着它。
+- **JS / JSON 里的地址**：总要经过 `fetch`、`XHR`、某个元素的 `src` 才发得出去，
+  而这几个出口注入的脚本全包了（app/proxyhook.py），**不改也照样走代理**。
+
+改了反而有代价：`https://api.example.com` 变成 `/api/proxy/<id>/…` 之后就不再是一条
+**绝对**地址了，而站点代码往往当它是绝对地址在用——
+
+- `new URL(路径, 那个常量)` 直接抛 `Invalid base URL`，React 那类框架的错误边界
+  一接住就是整页「页面加载失败」，而且报错在浏览器里，后端日志一片 200；
+- 拿地址算签名的（メルカリ 的 DPoP 把请求路径签进 `htu` 里）签的是代理路径，
+  上游一对不上就 401，表现成「页面壳子出来了，内容全是空的」。
+
+所以：**站点自己拿地址做文章的（签名、鉴权、SDK 里写死的 origin 比对），把这项关掉。**
+代价是 `location.href = 'https://…'` 这种钩子拦不住的跳转会直接走出代理
+（`Location` 的属性是 unforgeable，脚本改不了）——关之前先点几下确认没有这种写法。
 
 **被认领的卡片会自动按整站模式办**（见 app/proxy.py 的 `_to_target`）：这里躺着的
 本来就是「直接转发必坏」的那几个站，认出来了还按直接转发办没有意义。
@@ -72,6 +94,11 @@ def hosts_of(mod: Optional[ModuleType]) -> tuple[str, ...]:
 
 def browser_js(mod: Optional[ModuleType]) -> str:
     return str(getattr(mod, 'BROWSER_JS', '') or '') if mod else ''
+
+
+def rewrite_js(mod: Optional[ModuleType]) -> bool:
+    """这个站的 JS/JSON 正文要不要改写地址。没写就是要（默认 True），见上面那段。"""
+    return bool(getattr(mod, 'REWRITE_JS', True)) if mod else True
 
 
 def name_of(mod: Optional[ModuleType]) -> str:
@@ -163,6 +190,6 @@ def prefer_japanese(headers: list) -> None:
 # ---------------------------------------------------------------- 站点清单
 # **必须放在文件末尾**：下面几个模块 import 的是本文件里的 Ctx 和那几个小工具，
 # 放在开头的话它们 import 回来时这些还没定义，整个包都起不来。
-from . import mercari, paypayfleamarket, yahoo_auctions     # noqa: E402
+from . import github, mercari, paypayfleamarket, yahoo_auctions     # noqa: E402
 
-_MODULES: tuple[ModuleType, ...] = (mercari, paypayfleamarket, yahoo_auctions)
+_MODULES: tuple[ModuleType, ...] = (github, mercari, paypayfleamarket, yahoo_auctions)

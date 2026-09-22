@@ -68,6 +68,7 @@ hiddenimports = [
     # 图和接口在别的域名上的站点会变成「页面打得开，图全裂」。
     'app.proxy_webside',
     'app.proxy_webside._yahoo',
+    'app.proxy_webside.github',
     'app.proxy_webside.mercari',
     'app.proxy_webside.paypayfleamarket',
     'app.proxy_webside.yahoo_auctions',

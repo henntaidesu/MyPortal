@@ -34,6 +34,10 @@ _JS = r"""
   var C = __PORTAL_CONFIG__;
   if (window.__portal) return;
 
+  /* 原生的那一个。下面会把 window.URL 包一层，内部解析一律用这份，
+     免得绕回包装函数里去 */
+  var NativeURL = window.URL;
+
   var ATTRS = ['src', 'href', 'action', 'formaction', 'poster', 'data', 'ping', 'manifest'];
   var SETATTRS = { src: 1, href: 1, action: 1, formaction: 1, poster: 1, data: 1, ping: 1, manifest: 1 };
 
@@ -47,22 +51,31 @@ _JS = r"""
     return false;
   }
 
-  /* 当前页面对应的**真实**地址。相对地址要拿它当基准解析，
-     拿 location.href 当基准的话，解析出来的是门户上那条代理路径，主机名就丢了 */
-  function realHref() {
-    var p = location.pathname, tail = null;
+  /* 门户上的一条代理地址 → 它对应的上游真实地址。不是代理地址就返回 null。
+     参数要的只是 pathname / search / hash 三样，所以 location 也能直接递进来。
+     后端那边的同一件事在 app/proxy.py 的 `_real_url`。 */
+  function unproxy(u) {
+    var p = u.pathname || '';
     if (p.indexOf(C.base) === 0) {
       var rest = p.slice(C.base.length), i = rest.indexOf('/');
       var sch = i < 0 ? '' : rest.slice(0, i);
       if (sch === 'http' || sch === 'https') {
         var body = rest.slice(i + 1), j = body.indexOf('/');
         var host = j < 0 ? body : body.slice(0, j);
-        if (host) return sch + '://' + host + (j < 0 ? '/' : body.slice(j)) + location.search + location.hash;
+        if (host) return sch + '://' + host + (j < 0 ? '/' : body.slice(j)) + u.search + u.hash;
       }
-    } else if (p.indexOf(C.mount) === 0) {
-      tail = p.slice(C.mount.length);      /* 老形状：/api/proxy/<id>/<路径> */
+      return null;
     }
-    return C.scheme + '://' + C.host + '/' + (tail || '') + location.search + location.hash;
+    if (p.indexOf(C.mount) === 0) {     /* 老形状：/api/proxy/<id>/<路径> */
+      return C.scheme + '://' + C.host + '/' + p.slice(C.mount.length) + u.search + u.hash;
+    }
+    return null;
+  }
+
+  /* 当前页面对应的**真实**地址。相对地址要拿它当基准解析，
+     拿 location.href 当基准的话，解析出来的是门户上那条代理路径，主机名就丢了 */
+  function realHref() {
+    return unproxy(location) || (C.scheme + '://' + C.host + '/' + location.search + location.hash);
   }
 
   function mount(proto, host, rest) {
@@ -80,14 +93,14 @@ _JS = r"""
     /* data:、blob:、mailto:、javascript:、ws: —— 有协议名而且不是 http(s) 的一律不碰 */
     if (/^[a-z][a-z0-9+.\-]*:/i.test(raw) && !/^https?:/i.test(raw)) return input;
     var abs;
-    try { abs = new URL(raw, realHref()); } catch (e) { return input; }
+    try { abs = new NativeURL(raw, realHref()); } catch (e) { return input; }
     if (abs.protocol !== 'http:' && abs.protocol !== 'https:') return input;
     var rest = abs.pathname + abs.search + abs.hash;
     if (abs.origin === location.origin) {
       if (abs.pathname.indexOf(C.mount) === 0) return input;   /* 已经在代理底下 */
       /* 门户自己这个 origin 上的根绝对地址：本来是上游的路径，被解析到门户头上了 */
       var me;
-      try { me = new URL(realHref()); } catch (e) { return input; }
+      try { me = new NativeURL(realHref()); } catch (e) { return input; }
       return mount(me.protocol.slice(0, -1), me.host, rest);
     }
     if (!allowed(abs.hostname)) return input;
@@ -99,14 +112,14 @@ _JS = r"""
   function toProxyWs(input) {
     if (!input) return input;
     var raw = String(input), abs;
-    try { abs = new URL(raw, realHref()); } catch (e) { return input; }
+    try { abs = new NativeURL(raw, realHref()); } catch (e) { return input; }
     var up = abs.protocol === 'wss:' ? 'https' : abs.protocol === 'ws:' ? 'http' : null;
     if (!up) return input;
     if (abs.host === location.host && abs.pathname.indexOf(C.mount) === 0) return input;
     var host = abs.host, rest = abs.pathname + abs.search;
     if (abs.host === location.host) {
       var me;
-      try { me = new URL(realHref()); } catch (e) { return input; }
+      try { me = new NativeURL(realHref()); } catch (e) { return input; }
       host = me.host;
       up = me.protocol === 'https:' ? 'https' : 'http';
     } else if (!allowed(abs.hostname)) {
@@ -126,7 +139,93 @@ _JS = r"""
     }).filter(Boolean).join(', ');
   }
 
-  window.__portal = { to: toProxy, ws: toProxyWs, real: realHref, cfg: C };
+  window.__portal = { to: toProxy, ws: toProxyWs, real: realHref, cfg: C, un: unproxy };
+
+  /* ---------------- new URL(x, base) ---------------- */
+
+  /* **改写把绝对地址变成了相对地址，而 `new URL` 的基准必须是绝对的。**
+
+     app/proxyrewrite.py 把正文里的 `https://jp.mercari.com` 换成
+     `/api/proxy/<id>/__portal__/https/jp.mercari.com`，是一条根绝对路径。
+     站点代码里 `new URL(path, 'https://jp.mercari.com')` 这种写法非常常见，
+     换完之后基准不再是绝对地址，构造器当场抛 TypeError。React 那类框架的
+     错误边界一接住，整页就变成站点自己的「页面加载失败」——メルカリ 首页
+     正是这么白的（`<html id="__next_error__">`），而且报错发生在浏览器里，
+     后端日志一片 200，非常难查。
+
+     基准解析得开就一个字都不动（绝大多数调用都走这条）。解不开才按
+     「它本来是一条上游地址」还原：基准和输入都换回上游的真实地址，
+     在上游那边解析完，再折回代理底下。
+
+     **不能图省事拿门户的 origin 去补基准**：`new URL('/v1/x', 上游A)` 会变成
+     「门户/v1/x」，上游 A 那个主机名就丢了，请求打到门户自己头上。 */
+  function urlArgs(input, base) {
+    /* 只认「被改写过的绝对地址」这一种形状（改写出来的一律以 C.mount 打头）。
+       基准本来就是绝对地址的走不到这儿；`new URL(x, null)`、`new URL(x, '')`
+       这类照旧抛——那是站点自己的毛病，不该被这里悄悄兜掉 */
+    var b = String(base);
+    if (b.indexOf(C.mount) !== 0) return null;
+
+    var realBase;
+    try { realBase = unproxy(new NativeURL(b, location.origin)); } catch (e) { return null; }
+    if (!realBase) return null;
+
+    /* 输入也可能被改写过（`new URL(绝对地址A, 绝对地址B)` 两个都会被换掉）。
+       只还原确实指着代理的那些：相对地址得留给下面按 realBase 解析 */
+    var raw = (input === null || input === undefined) ? '' : String(input), realIn = raw;
+    try {
+      if (raw.indexOf(C.mount) === 0) {
+        realIn = unproxy(new NativeURL(raw, location.origin)) || raw;
+      } else if (/^https?:/i.test(raw)) {
+        var abs = new NativeURL(raw);
+        if (abs.origin === location.origin) realIn = unproxy(abs) || raw;
+      }
+    } catch (e) {}
+
+    var out;
+    try { out = new NativeURL(realIn, realBase); } catch (e) { return null; }
+    /* toProxy 回来的要么是代理路径，要么（白名单之外）是原样的上游绝对地址，
+       两种都拿 location.href 当基准解析得开。给回代理路径而不是上游地址：
+       这个站的 JS 里其余地址也都是改写过的，跟着一致，
+       站点把结果丢给 `location.href` 时也还留在代理底下 */
+    return [toProxy(out.href), location.href];
+  }
+
+  try {
+    var PortalURL = function (input, base) {
+      if (base === undefined) {
+        /* 单参数的 `new URL(x)` 同样要求 x 是绝对地址。站点原本写的是一条完整地址，
+           被改写成 `/api/proxy/<id>/…` 之后就不是了——补上门户自己的 origin，
+           指向的还是同一个地方。不是代理路径的照旧抛，那是站点自己的毛病 */
+        var one = (input === null || input === undefined) ? '' : String(input);
+        return one.indexOf(C.mount) === 0
+          ? new NativeURL(one, location.origin) : new NativeURL(input);
+      }
+      var fixed = urlArgs(input, base);
+      return fixed ? new NativeURL(fixed[0], fixed[1]) : new NativeURL(input, base);
+    };
+    /* 原型要共用，不然页面里的 `x instanceof URL` 会变成 false；
+       静态方法（createObjectURL 那几个）是不可枚举的，for-in 抄不过来，
+       所以走原型链，再把常用的那几个显式绑一遍 */
+    PortalURL.prototype = NativeURL.prototype;
+    try { Object.setPrototypeOf(PortalURL, NativeURL); } catch (e) {}
+    ['createObjectURL', 'revokeObjectURL'].forEach(function (k) {
+      if (typeof NativeURL[k] === 'function') PortalURL[k] = NativeURL[k].bind(NativeURL);
+    });
+    /* canParse / parse 是同一个构造器的另外两张脸，基准的毛病一模一样。
+       它们不抛异常，只会回 false / null，不修的话站点会以为那条地址不合法 */
+    ['canParse', 'parse'].forEach(function (k) {
+      if (typeof NativeURL[k] !== 'function') return;
+      var orig = NativeURL[k];
+      PortalURL[k] = function (a, b) {
+        if (b === undefined) return orig.call(NativeURL, a);
+        var fixed = urlArgs(a, b);
+        return fixed ? orig.call(NativeURL, fixed[0], fixed[1]) : orig.call(NativeURL, a, b);
+      };
+    });
+    window.URL = PortalURL;
+    if (window.webkitURL === NativeURL) window.webkitURL = PortalURL;
+  } catch (e) {}
 
   function wrap(owner, name, make) {
     try {

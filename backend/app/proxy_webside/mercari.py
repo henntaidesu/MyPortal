@@ -3,10 +3,10 @@
 日本的二手交易站，Next.js App Router 写的。整站代理它要过三关：
 
 1. **静态资源全在别的域名上**：页面在 `jp.mercari.com`，JS 和 CSS 在
-   `web-jp-assets-v2.mercdn.net`，商品图在 `static.mercdn.net`。
-   不把 `mercdn.net` 放进白名单的话，页面能开，但是一张图没有、脚本一个不跑。
-2. **接口是同域的相对地址**（`/v1/...` 这种），所以没有额外的接口域名要放行——
-   翻过它的打包产物确认过，里面出现的外部域名只有文档链接。
+   `web-jp-assets-v2.mercdn.net`，商品图在 `static.mercdn.net`，
+   接口在 `api.mercari.jp`，登录在 `auth.mercari.com`。
+   不把这几个放进白名单的话，页面能开，但是一张图没有、脚本一个不跑。
+2. **JS 里的地址一个都不能改**，见下面 `REWRITE_JS`。
 3. **App Router 的路由首部里带着「当前路径」**，见下面 `on_request`。
 
 按地区拦人这件事由通用那边管：整站模式不会把 `X-Forwarded-For` 发给上游
@@ -29,6 +29,22 @@ HOSTS = (
     'mercari-shops-static.com',
     'mercariapp.com',
 )
+
+
+# **这个站的 JS / JSON 正文一个地址都不能改。** 两处都栽在同一件事上——改完之后
+# `https://api.mercari.jp` 成了 `/api/proxy/<id>/…`，不再是一条绝对地址：
+#
+#   1. 打包产物里有 `new URL(路径, 'https://jp.mercari.com')` 这种写法，基准塌了就抛
+#      `Invalid base URL`。Next.js 的错误边界一接住，整页换成它自己那张
+#      `<html id="__next_error__">`（Chrome 里长得和网络错误页一模一样，写着
+#      「This page couldn't load」），而后端日志从头到尾全是 200，非常难查。
+#   2. 接口鉴权走 DPoP：请求路径要签进 JWT 的 `htu` 里。改过地址之后签的是代理路径，
+#      `api.mercari.jp` 一对不上就整片 401，表现成「壳子出来了，商品一个都没有」。
+#
+# 不改也不影响走代理：JS 里的地址总要经过 fetch / XHR / 元素的 src 才发得出去，
+# 那几个出口注入的脚本全包了（app/proxyhook.py）。HTML 和 CSS 照常改——那两种
+# 浏览器解析到就直接用，钩子插不上手。
+REWRITE_JS = False
 
 
 def on_request(ctx: Ctx, headers: list) -> None:

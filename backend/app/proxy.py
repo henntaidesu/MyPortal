@@ -237,7 +237,8 @@ def _target(user_id: int, item_id: str) -> Target:
 
 
 def _rewriter(target: Target) -> Rewriter:
-    return Rewriter(target.mount, target.allow, webside.browser_js(target.module))
+    return Rewriter(target.mount, target.allow, webside.browser_js(target.module),
+                    webside.rewrite_js(target.module))
 
 
 # ---------------------------------------------------------------- 地址
@@ -474,6 +475,37 @@ def _request_headers(request: Request, target: Target, scheme: str, host: str,
     return out
 
 
+def _accepts(request: Request, encoding: str) -> bool:
+    """调用方认不认这种压缩方式。
+
+    整站模式下发给上游的 `Accept-Encoding` 是门户自己写的（`_ACCEPT_ENCODING`）——
+    正文要解得开才改得动。所以上游回来的编码**调用方未必认**：浏览器无所谓
+    （gzip / br 都认），但拿 `wget` 或者下载工具去拉一个 Release 附件的会说
+    `identity`，照直把 gzip 转回去，落到磁盘上的就是一坨解不开的字节，
+    而且文件名、长度看着都对。
+    """
+    header = request.headers.get('accept-encoding')
+    if header is None:
+        return False                      # 一个字没说 = 只认原文（RFC 9110 8.4.1）
+    star = False
+    for piece in header.split(','):
+        name, _, params = piece.strip().partition(';')
+        q = 1.0
+        for param in params.split(';'):
+            key, _, value = param.partition('=')
+            if key.strip().lower() == 'q':
+                try:
+                    q = float(value.strip())
+                except ValueError:
+                    q = 0.0
+        name = name.strip().lower()
+        if name == encoding:
+            return q > 0
+        if name == '*':
+            star = q > 0
+    return star
+
+
 def _origin_of(url: str) -> str:
     parts = urlsplit(url)
     return f'{parts.scheme}://{parts.netloc}' if parts.scheme and parts.netloc else ''
@@ -548,7 +580,7 @@ def _rewrite_location(value: str, target: Target, scheme: str, host: str,
 
 
 def _response_headers(resp: httpx.Response, target: Target, scheme: str, host: str,
-                      rewriter: Optional[Rewriter], buffered: bool) -> list[tuple[bytes, bytes]]:
+                      rewriter: Optional[Rewriter], decoded: bool) -> list[tuple[bytes, bytes]]:
     """原样带回，除了逐跳首部、那几个讲源站规矩的（`_STRIP`）、Set-Cookie 和 Location。
 
     走 `resp.headers.raw` 而不是 `.items()`：Set-Cookie 一次可能有好几条，
@@ -560,7 +592,7 @@ def _response_headers(resp: httpx.Response, target: Target, scheme: str, host: s
         low = name.lower()
         if low in _HOP or low in _STRIP:
             continue
-        if buffered and low in ('content-length', 'content-encoding'):
+        if decoded and low in ('content-length', 'content-encoding'):
             # 正文已经解压、改过长度了，这两个头再带回去就是错的
             continue
         value = raw_value.decode('latin-1')
@@ -678,10 +710,16 @@ async def forward(item_id: str, path: str, request: Request,
 
     # 流式转：几百兆的下载不该在门户内存里攒一份。
     # aiter_raw 给的是没解压过的原字节，所以 content-encoding 原样带回去也对得上。
+    # 例外是上游用了一种**调用方没说自己认**的压缩（见 `_accepts`），那就走
+    # aiter_bytes 当场解开——httpx 边收边解，一样是流式的，内存不会涨。
+    encoding = resp.headers.get('content-encoding', '').strip().lower()
+    decode = (bool(encoding) and encoding != 'identity' and not _accepts(request, encoding)
+              and request.method != 'HEAD' and resp.status_code not in (204, 304))
     # 响应读完（或者浏览器中途跑了）之后由 BackgroundTask 把上游连接还回池子
-    response = StreamingResponse(resp.aiter_raw(), status_code=resp.status_code,
+    response = StreamingResponse(resp.aiter_bytes() if decode else resp.aiter_raw(),
+                                 status_code=resp.status_code,
                                  background=BackgroundTask(resp.aclose))
-    response.raw_headers = _response_headers(resp, target, scheme, host, rewriter, False)
+    response.raw_headers = _response_headers(resp, target, scheme, host, rewriter, decode)
     return response
 
 
@@ -733,7 +771,7 @@ async def _rewritten(resp: httpx.Response, target: Target, ctx: webside.Ctx,
 
     await resp.aclose()
     # 这里往下不能再退回流式了：正文已经读完，而且是解压过的。
-    # 所以即使不改写，也得按 buffered 发回去（content-encoding / length 都要重算）
+    # 所以即使不改写，也得按「解压过的」发回去（content-encoding / length 都要重算）
     if charset is not None:
         try:
             text = rewriter.body(kind, body.decode(charset, errors='replace'), scheme, host)

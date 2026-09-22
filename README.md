@@ -59,12 +59,43 @@ npm run dev                       # http://localhost:9920
 
 右上角是当前登录的人，点开有：
 
+- **导入导航** —— 见下面那节
 - **账号** —— 改显示名、改口令、看绑了哪些单点登录、把自己所有设备踢下线
 - **用户管理**（只有管理员看得到）—— 建号、改角色、停用、重置口令、踢下线、删除
 - **退出登录**
 
-> 页面上只有分类和卡片：没有标题栏、没有主题切换、没有搜索，也没有导入导出。
+> 页面上只有分类和卡片：没有标题栏、没有主题切换、没有搜索。
 > 深浅色跟随系统。登录状态按 `session_hours`（默认 168 小时）自动过期。
+
+## 导入导航
+
+右上角菜单 → **导入导航**。三种来源：
+
+- **从服务器上那份 `conf.json` 读进来**（只有管理员看得到这个按钮）。
+  从单账号那一版升上来、或者手里有一份老的 `conf.json` 时用这个最省事：
+  把文件放回 `backend/` 再点一下就行。
+- **选一个 JSON 文件**
+- **直接把内容粘进去**
+
+认的形状很松，下面这些都收：
+
+```
+{ "server": {...}, "auth": {...}, "nav": { "groups": [...] } }   整份 conf.json
+{ "title": "...", "theme": "auto", "groups": [...] }             只有 nav 那一段
+{ "groups": [...] }   或   { "items": [...] }                    再省一点
+[ { "name": "常用", "items": [...] } ]                            光一个分类数组
+[ { "name": "GitHub", "url": "github.com" } ]                    光一串卡片
+```
+
+会先告诉你「认出 N 个分类 M 张卡片」，再让你选怎么导：
+
+- **合并进来** —— 同名分类并到一起，同一个分类里**地址重复的跳过**，
+  没有的分类追加到末尾。
+- **替换现有** —— 现有的整棵树被盖掉。**没有撤销**，会先问一遍。
+
+导进来的东西和平常改卡片一样自动存到服务器，不用另外点保存。
+
+> 没有「导出」：数据在 MySQL 里，**备份就是备份那个库**。
 
 ## 多用户
 
@@ -200,6 +231,9 @@ Okta、Auth0、Google 等。在 `conf.json` 里填：
    - 把 `conf.json` 里的 `nav` 整段搬到这个管理员名下，**原文件那一段留着不动**。
 4. 登进去确认导航都在，然后可以把 `conf.json` 里的 `nav` 和 `auth.password` 删掉。
 
+**自动搬只会发生一次**（记在库里的 `portal_meta` 表）。搬的时候出了岔、或者后来又换了
+一份 `conf.json` 想再导一次，用右上角的「导入导航 → 从服务器读进来」。
+
 ## 部署
 
 ```bash
@@ -243,6 +277,7 @@ webside/src/
 ├── styles.css              主题变量
 └── components/
     ├── LoginView.vue       登录页（本地表单 + 单点登录按钮）
+    ├── ImportDialog.vue    导入导航（选文件 / 粘贴 / 从服务器读）
     ├── AccountDialog.vue   账号：显示名、改口令、踢掉所有设备
     ├── UsersDialog.vue     用户管理（管理员）
     ├── NavGroup.vue        一个分类 = 一张大卡
@@ -272,6 +307,7 @@ backend/
     ├── tray.py             打包后的托盘图标
     ├── proxy_webside/      一个站一个文件的特化规则
     │   ├── _yahoo.py       两个雅虎站共用的域名清单
+    │   ├── github.py       GitHub
     │   ├── mercari.py      メルカリ
     │   ├── yahoo_auctions.py      ヤフオク!
     │   └── paypayfleamarket.py    PayPayフリマ
@@ -280,7 +316,7 @@ backend/
         ├── account.py      /api/account：改自己的显示名、口令、踢自己下线
         ├── users.py        /api/users：用户管理（管理员）
         ├── cookies.py      /api/cookies：看/清 Cookie 代理存的登录数据
-        └── nav.py          /api/nav 的 GET / PUT
+        └── nav.py          /api/nav 的 GET / PUT，以及 /api/nav/legacy
 
 pyinstaller.bat             打包：构建前端 + 打出单文件 Portal.exe
 portal.spec                 PyInstaller 配置（前端打进 exe，conf.json 留在外面）

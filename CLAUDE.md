@@ -198,8 +198,9 @@ pyinstaller.bat                   # 产物 Releases\<版本>\Portal.exe
 - **进页面先画缓存不等接口**，后端连不上时照常能看能改。改动一发生就打一个
   `portal-nav:dirty` 标记，推成功才清掉；下次进来看到标记就**先推后拉**，
   免得把本机没同步的改动冲掉。
-- **界面仍然是被刻意削到只剩分类和卡片的**：标题栏、主题切换、搜索、导入导出、
+- **界面仍然是被刻意削到只剩分类和卡片的**：标题栏、主题切换、搜索、**导出**、
   底部统计，都是按要求逐条去掉的，不是漏写的。加回去之前先问一声。
+  （导入是按要求加回来的，导出没有——要备份就备份那个库。）
   **右上角那一小块是多用户绕不过去才加回来的**（当前登录的是谁、账号、用户管理、退出）：
   一个人的门户不需要「我是谁」，多个人的必须有，不然同一台电脑上换了个人登，
   看着一模一样的页面，改了半天才发现改的是别人那份。它是绝对定位的，
@@ -212,6 +213,24 @@ pyinstaller.bat                   # 产物 Releases\<版本>\Portal.exe
 - **页面上没有任何「存失败了」的提示**：`sync.offline` 还在 store.js 里照常维护，
   但没有 UI 读它了。要加提示的话接这个字段，别另起一套。
 - **冲突是后写的盖先写的**，不做合并。自己给自己看的一页东西，为它做合并不值当。
+- **导入也只改 `state`，不另开一条跟后端说话的路**（`parseImport` / `importNav`，
+  [ImportDialog.vue](webside/src/components/ImportDialog.vue) 只管把文本递进来）。
+  改完 state 之后存盘走的还是那条自动保存——这是 store.js 那条边界的直接好处：
+  导入这个功能后端**一行都不用改**。
+  - 认的形状故意放得很松：整份 `conf.json`、只有 `nav` 那一段、只有 `groups` 或
+    `items`、甚至光一个数组。人手里那份 JSON 是从哪儿抠出来的说不准，
+    为形状不对而拒收只会让人回去自己拼一个外层壳子。
+  - **合并时撞了 id 要换一个新的**：不换的话拖拽、编辑会认错对象，而且 Cookie 罐子
+    钉在卡片 id 上（app/cookiejar.py），会串到另一张卡片去。
+  - **替换时反而要保留导入的 id**：这样「导出再导回来」能接上原来的罐子。
+  - `title` / `theme` 只在导入的数据里**真的写了**的时候才盖掉现有的，
+    和 `normalize()` 那条「别把人家手写的标题抹掉」是同一个道理。
+- **[`GET /api/nav/legacy`](backend/app/routers/nav.py) 要管理员，而且只读。**
+  它把 conf.json 里那段老导航原样交出去，给页面上的「从服务器导入」用。
+  要管理员不是只要登录：那一段是单账号时代那个人的导航，里面多半是内网地址
+  和后台入口。首启时它已经自动搬进第一个管理员名下了（`navstore.import_legacy`，
+  而且靠 `portal_meta` 里的标记**只搬一次**），这条接口是留给「搬的时候出了岔」
+  「换了一份 conf.json 想再导一次」这类情况的手动入口。
 - **卡片和分类里有哪些字段后端不管**（`navstore.clean` 只看标题、主题、条数和体积）。
   摊不进列的字段**原样进 `extra` 这个 JSON 列**，读出来再摊回卡片上——这是上一版
   「加字段只改 store.js」那条约定的延续。列写死的话，前端加一个字段就得改表结构、
@@ -316,6 +335,16 @@ pyinstaller.bat                   # 产物 Releases\<版本>\Portal.exe
 - **JS 里 `"/"` 开头的字符串故意不改**：那大半是路由名、正则、模板，不是地址。
   改错了页面还能跑，但行为悄悄变了，最难查。那一类交给注入的脚本在真要发请求时再判，
   再兜不住就落到 `Fallback` 那条 Referer 兜底上。
+- **改 JS 正文这一道是可以按站关掉的**（站点模块里 `REWRITE_JS = False`，见下）。
+  两道改写的性质不一样：HTML/CSS 里的地址浏览器解析到就直接用了，钩子插不上手，
+  非改不可；**JS/JSON 里的地址总要经过 `fetch`/`XHR`/某个 `src` 才发得出去，
+  钩子全包了，不改也照样走代理**。而改了有代价——`https://api.x.com` 变成
+  `/api/proxy/<id>/…` 之后不再是**绝对**地址，站点却当它是：
+  `new URL(路径, 那个常量)` 当场抛 `Invalid base URL`，拿地址算签名的（DPoP）
+  签出来的是代理路径，上游一对不上就整片 401。メルカリ 两条都踩了，所以它关着。
+- **注入的脚本把 `URL` 构造器包了一层**（proxyhook.py 的 `urlArgs`）：基准解析得开
+  就一个字不动，解不开（= 被改写过的绝对地址）才还原成上游地址解析完再折回代理底下。
+  这是给**还开着** JS 改写的站兜的底，不是给 `REWRITE_JS = False` 那些站用的。
 - **改写过的正文必须把 `integrity` 拆掉**：SRI 的哈希是按原文算的，改过就对不上，
   浏览器会直接拒绝执行那个脚本，表现成整页白屏。
 - **`Referer` 和 `Origin` 要换成上游的真实地址**（两种模式都换）。上游拿它们做防盗链
@@ -338,6 +367,11 @@ pyinstaller.bat                   # 产物 Releases\<版本>\Portal.exe
   改写的话上游回一个 `Location: 任意地址` 门户就替人去访问了，又成了开放中继。
 - **`transfer-encoding` 必须滤掉**（逐跳首部）：httpx 交回来的已经是拆好块的字节，
   把这个头带回去浏览器会照着再拆一遍，拿到一堆长度前缀。
+- **转回去之前要看调用方认不认这种压缩**（`_accepts`）。整站模式下发给上游的
+  `Accept-Encoding` 是门户自己写的（正文要解得开才改得动），回来的编码调用方未必认：
+  浏览器无所谓，但拿 `wget` 或者下载工具去拉一个 Release 附件的会说 `identity`，
+  照直把 gzip 转回去，落到磁盘上就是一坨解不开的字节，而文件名和长度看着都对。
+  认不了的走 `aiter_bytes` 当场解开（httpx 边收边解，一样是流式的）。
 - **响应头走 `resp.headers.raw` 不走 `.items()`**：`Set-Cookie` 一次可能好几条，
   字典形状只留得下最后一条。
 - **dev 下 vite 的 `/api` 代理要 `ws: true`**，否则带 web 终端、实时日志的页面
@@ -403,14 +437,23 @@ pyinstaller.bat                   # 产物 Releases\<版本>\Portal.exe
 主机名把模块找出来（后缀最长的赢，`auctions.yahoo.co.jp` 和
 `paypayfleamarket.yahoo.co.jp` 是两个站，别互相认领）。
 
-现在有 `mercari.py`、`yahoo_auctions.py`、`paypayfleamarket.py`，
+现在有 `github.py`、`mercari.py`、`yahoo_auctions.py`、`paypayfleamarket.py`，
 两个雅虎站共用的域名清单在 `_yahoo.py`（下划线开头 = 不是站点模块，不进 `_MODULES`）。
-模块里 `NAME` / `DOMAINS` / `HOSTS` / `BROWSER_JS` / `on_request` / `on_response` /
-`on_html` 都是可选的，缺了就当没有；钩子抛异常只打一行日志，不会把请求带崩——
-这些文件记的是「某个站现在这么写」，改版之后随时可能对不上。
+**大多数站点模块其实只是一份域名清单**：GitHub 那个就只有 `HOSTS`，
+一个钩子都没有——它的毛病只有「资源全在 `githubassets.com` / `githubusercontent.com` 上」
+这一条，不放行的话首页一百多个请求会从用户自己的出口 IP 直连出去。
+模块里 `NAME` / `DOMAINS` / `HOSTS` / `BROWSER_JS` / `REWRITE_JS` / `on_request` /
+`on_response` / `on_html` 都是可选的，缺了就当没有；钩子抛异常只打一行日志，
+不会把请求带崩——这些文件记的是「某个站现在这么写」，改版之后随时可能对不上。
 
 - **被认领的卡片自动按整站办**，哪怕卡片上选的是「直接转发」：这里躺着的本来就是
   直接转发必坏的那几个站，认出来了还按直接转发办，只会让人对着半张页面查半天。
+- **`REWRITE_JS = False` 之后这个站的问题基本都得靠注入的脚本兜**，代价是
+  `location.href = 'https://…'` 这种钩子拦不住的跳转会直接走出代理。关之前先点几下。
+  这一类毛病**后端日志全是 200**，只在浏览器里报——查的时候别盯着日志，
+  开 DevTools 看 console，或者拿 playwright 挂 `pageerror` 跑一遍
+  （メルカリ 那次就是这么定位的：Next.js 的错误边界 `<html id="__next_error__">`
+  长得和 Chrome 的网络错误页一模一样，写着「This page couldn't load」）。
 - **`_MODULES` 和 [portal.spec](portal.spec) 的 `hiddenimports` 都是写死的清单，
   新加站点文件两处都要加。** 前者别改成 pkgutil 扫目录、后者别改成
   `collect_submodules`：PyInstaller 靠静态分析决定打包什么，动态导入它看不见，

@@ -203,13 +203,15 @@ _META_CHARSET = re.compile(r'<meta\s[^>]*charset\s*=[^>]*>', re.I)
 class Rewriter:
     """一张卡片一套改写规则。`mount` 是 `/api/proxy/<卡片 id>/`。"""
 
-    __slots__ = ('mount', 'base', 'allow', 'extra_js', '_proxied')
+    __slots__ = ('mount', 'base', 'allow', 'extra_js', 'rewrite_code', '_proxied')
 
-    def __init__(self, mount: str, allow: tuple[str, ...], extra_js: str = ''):
+    def __init__(self, mount: str, allow: tuple[str, ...], extra_js: str = '',
+                 rewrite_code: bool = True):
         self.mount = mount
         self.base = f'{mount}{MARK}/'
         self.allow = allow
         self.extra_js = extra_js
+        self.rewrite_code = rewrite_code
         # 反向：代理地址 → 真实地址。前面那半截门户地址可有可无，
         # 页面脚本拿 location.href 拼出来的是带门户地址的完整形状
         self._proxied = re.compile(r'(?:(https?)://[^/\s"\'<>]+)?' + re.escape(self.base)
@@ -273,8 +275,13 @@ class Rewriter:
         **根绝对地址（`"/api/items"`）这里不碰**：JS 里 `"/"` 开头的字符串大半不是地址，
         是路由名、正则、模板。改错了页面还能跑，但行为悄悄变了，最难查。
         那一类交给注入浏览器的那段脚本在真要发请求时再判（app/proxyhook.py）。
+
+        `rewrite_code` 关掉之后这一整道都不做，由注入的脚本独力兜着。
+        为什么会有这个开关、什么时候该关，见 app/proxy_webside/__init__.py 的
+        `REWRITE_JS`——一句话：JS 里的地址总要经过某个 API 才发得出去，钩子拦得住；
+        而站点拿地址算签名（メルカリ 的 DPoP）时，换过的地址会让签名对不上。
         """
-        return self._absolute(text, scheme)
+        return self._absolute(text, scheme) if self.rewrite_code else text
 
     def css(self, text: str, scheme: str, host: str) -> str:
         text = self._absolute(text, scheme)

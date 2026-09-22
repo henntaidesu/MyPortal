@@ -274,6 +274,122 @@ export function unbind() {
   state.title = DEFAULT_TITLE
 }
 
+// ------------------------------------------------------------------ 导入
+
+/**
+ * 认得出来的几种形状，全都收：
+ *
+ *   {server, auth, nav: {...}}   整份 conf.json（最常见：把老机器上那份直接拖进来）
+ *   {title, theme, groups: []}   只有 nav 那一段
+ *   {groups: []} / {items: []}   再省一点
+ *   [ {name, items: []} ]        光一个分类数组
+ *   [ {name, url} ]              光一串卡片（老的扁平结构）
+ *
+ * 认得越松越好：人手里那份 JSON 是从哪儿抠出来的说不准，为形状不对而拒收，
+ * 只会让人回去自己拼一个外层壳子。
+ */
+function pickNav(raw) {
+  if (Array.isArray(raw)) {
+    if (raw.some((x) => x && Array.isArray(x.items))) return { groups: raw }
+    if (raw.some((x) => x && typeof x.url === 'string')) return { items: raw }
+    return null
+  }
+  if (!raw || typeof raw !== 'object') return null
+  // 整份 conf.json。nav 是 null 的时候（还没配过的机器）当作没有，别当成一份空导航
+  if (raw.nav && typeof raw.nav === 'object') return raw.nav
+  if (Array.isArray(raw.groups) || Array.isArray(raw.items)) return raw
+  return null
+}
+
+/** 一段文本 → 可以导入的那份。认不出来就抛一句人话 */
+export function parseImport(text) {
+  let raw
+  try {
+    raw = JSON.parse(text)
+  } catch (e) {
+    throw new Error('这不是一份能读的 JSON：' + e.message)
+  }
+  return fromObject(raw)
+}
+
+export function fromObject(raw) {
+  const nav = pickNav(raw)
+  if (!nav) {
+    throw new Error('这份数据里没有导航：认 conf.json 整份、认 nav 那一段、'
+      + '也认一个 groups 或 items 数组')
+  }
+  const normalized = normalize(nav)
+  const items = normalized.groups.reduce((n, g) => n + g.items.length, 0)
+  if (!items && !normalized.groups.length) throw new Error('这份数据里一个分类、一张卡片都没有')
+  return {
+    nav: normalized,
+    // title / theme 只在对方**真的写了**的时候才盖掉现有的：谁在 conf.json 里
+    // 手写过一个标题，不该被一次导入悄悄抹掉（和 normalize() 那条注释同一个道理）
+    hasTitle: typeof nav.title === 'string' && !!nav.title,
+    hasTheme: typeof nav.theme === 'string' && !!nav.theme,
+    groups: normalized.groups.length,
+    items
+  }
+}
+
+/**
+ * 把解析好的那份并进来。改的是 state，所以存盘走的还是那条自动保存的路——
+ * 导入不另开一条跟后端说话的通道（store.js 的边界就这一条）。
+ *
+ * `mode = 'merge'`：同名分类并进去，**同一个分类里地址重复的跳过**；没有的分类追加。
+ *                   卡片 id 撞上现有的就换一个新的。
+ * `mode = 'replace'`：整棵树换掉，导入那份的 id 原样留着——这样「导出再导回来」
+ *                   能接上原来的 Cookie 罐子（罐子钉在卡片 id 上，见 app/cookiejar.py）。
+ */
+export function importNav(parsed, mode = 'merge') {
+  const incoming = parsed.nav
+  if (parsed.hasTitle) state.title = incoming.title
+  if (parsed.hasTheme) state.theme = incoming.theme
+
+  if (mode === 'replace') {
+    state.groups.splice(0, state.groups.length, ...incoming.groups)
+    return { groups: parsed.groups, items: parsed.items, skipped: 0, replaced: true }
+  }
+
+  // 现有的全部 id。导入的 id 撞上任何一个都要换掉：撞了的话拖拽、编辑会认错对象，
+  // 而且 Cookie 罐子是钉在卡片 id 上的，会串到另一张卡片去
+  const used = new Set()
+  for (const g of state.groups) {
+    used.add(g.id)
+    for (const i of g.items) used.add(i.id)
+  }
+  const fresh = (id) => {
+    let next = id
+    while (!next || used.has(next)) next = uid()
+    used.add(next)
+    return next
+  }
+
+  let addedGroups = 0
+  let addedItems = 0
+  let skipped = 0
+  for (const g of incoming.groups) {
+    let target = state.groups.find((x) => x.name.trim() === g.name.trim())
+    if (!target) {
+      target = { id: fresh(g.id), name: g.name, items: [] }
+      state.groups.push(target)
+      target = state.groups[state.groups.length - 1]
+      addedGroups++
+    }
+    const have = new Set(target.items.map((i) => i.url))
+    for (const item of g.items) {
+      if (have.has(item.url)) {
+        skipped++            // 同一个分类里已经有这个地址了，不重复添加
+        continue
+      }
+      target.items.push({ ...item, id: fresh(item.id) })
+      have.add(item.url)
+      addedItems++
+    }
+  }
+  return { groups: addedGroups, items: addedItems, skipped, replaced: false }
+}
+
 // ------------------------------------------------------------------ 分类
 
 export function findGroup(gid) {
