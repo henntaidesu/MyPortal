@@ -7,7 +7,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 这是什么
 
 一个简单的导航页：前端是导航卡片页（Vue 3 + Vite，9920），后端是一个 Python 进程
-（FastAPI，9921），负责托管页面、一个账号的登录、读写导航数据、代抓站点图标。
+（FastAPI，9921），负责托管页面、一个账号的登录、读写导航数据、代抓站点图标、
+把开了「门户代理」那些卡片的请求替浏览器转出去（内网机器，或者只有门户这台够得着的站点）。
 
 **没有数据库。配置和数据在同一个文件里：`backend/conf.json`。**
 （仓库早先有过一套 MySQL + 单点登录 + 多用户的认证中心，已整体移除，别再往回加。）
@@ -94,8 +95,9 @@ pyinstaller.bat                   # 产物 Releases\<版本>\Portal.exe
   目前设计就是单进程。
 - **`COOKIE_SECURE` 反向陷阱**：https 部署必须开，但 http 环境下开了浏览器会**直接丢掉**
   登录 Cookie，表现为登录后立刻又变成未登录。
-- **`require_login` 是仓库里唯一一处权限校验**，`/api/nav` 和 `/api/icon` 两个 router
-  都挂在 `dependencies` 上。`/api/me` 故意**不**要求登录（没登录返回 200 + `user: null`）：
+- **`require_login` 是仓库里唯一一处权限校验**，`/api/nav`、`/api/icon`、`/api/proxy`
+  都挂在 `dependencies` 上（`/api/proxy` 的 WebSocket 那条是自己查 Cookie，见下面那节）。
+  `/api/me` 故意**不**要求登录（没登录返回 200 + `user: null`）：
   页面一起来就要问一次，回 401 会触发前端那条「会话过期」的通路，把「本来就还没登录」
   报成掉线。
 - **`/api/icon` 要求登录**，因为它会替调用方发请求。但登录之后**不拦内网地址**——
@@ -104,7 +106,7 @@ pyinstaller.bat                   # 产物 Releases\<版本>\Portal.exe
 ### 导航数据：分类 → 卡片两层，后端权威，localStorage 只是缓存
 
 ```
-{ title, theme, groups: [ { id, name, items: [ { id, name, url, desc, icon } ] } ] }
+{ title, theme, groups: [ { id, name, items: [ { id, name, url, desc, icon, proxy } ] } ] }
 ```
 
 一个分类在页面上画成一张大卡（[NavGroup.vue](webside/src/components/NavGroup.vue)）。
@@ -122,8 +124,9 @@ pyinstaller.bat                   # 产物 Releases\<版本>\Portal.exe
   `portal-nav:dirty` 标记，推成功才清掉；下次进来看到标记就**先推后拉**，
   免得把本机没同步的改动冲掉。
 - **界面是被刻意削到只剩分类和卡片的**：标题栏、主题切换、搜索、退出、导入导出、
-  底部统计、表单的 label 和 placeholder，都是按要求逐条去掉的，不是漏写的。
-  加回去之前先问一声。
+  底部统计，都是按要求逐条去掉的，不是漏写的。加回去之前先问一声。
+  （卡片表单的 label 和 placeholder 一度也被去掉，后来按要求加回来了：
+  编辑态字段是填好的，placeholder 顶不上来，只剩 label 认得出哪栏是哪栏。）
 - **`nav.title` 页面上不显示了，但照样读进来、照样写回去**：谁在 conf.json 里手写了
   一个标题，不该被下一次存导航悄悄抹掉。`state.theme` 同理（没有切换按钮了，
   但 `applyTheme` 照常跟着它走，默认 auto = 跟随系统）。
@@ -154,6 +157,131 @@ pyinstaller.bat                   # 产物 Releases\<版本>\Portal.exe
 - 目录名是 `webside`（不是 website），别顺手改。
 - `backend/conf.json` 含明文口令和全部数据，已在 .gitignore 里，仓库里**不该**出现它。
   没有 .example 模板文件，缺文件时由 config.py 的 `_DEFAULT` 现生成一份。
+
+### 门户代理：卡片上的开关，后端 [proxy.py](backend/app/proxy.py) 转发
+
+门户进程跑在**能打开那个站**的网络里，人在外面只连得上门户。卡片编辑框里把
+「门户代理」那一栏打开之后，这张卡片的链接就从 `http://192.168.1.10:8080` 换成
+`/api/proxy/<卡片 id>`，浏览器打到门户，门户转出去，响应带回来。**没有全局开关**——
+卡片上那个下拉框本身就是开关，数据在 `nav` 里，改完刷新即刻生效，不用重启。
+（那一栏做成下拉框不是勾选框：和「分类」一栏同一个形状，一列对齐下来每栏都是
+「标题 + 一个控件」，中间不会冒出一个跟别人不一样的方块。）
+
+**那一栏有三挡**，存进 `nav` 的就是 `false` / `true` / `"site"`：
+
+| 卡片上选 | `proxy` | 干什么 |
+| --- | --- | --- |
+| 关闭 | `false` | 直接连原地址 |
+| 开启 · 直接转发 | `true` | 只转卡片这一台机器，正文一个字不改。内网后台用它 |
+| 开启 · 整站 | `"site"` | 一张卡片转一整族域名，还改写页面里的地址。公网站点用它 |
+
+内网后台多半自己用相对地址，直接转发就够，也最不容易出事。公网站点不行——
+メルカリ 的脚本在 `mercdn.net`、雅虎的图在 `yimg.jp`，页面里写的又都是完整地址，
+不改写的话浏览器会绕过门户直连，从**用户自己的出口 IP** 打过去，站点按地区拦人时
+就成了半张页面。**整站模式里 `X-Forwarded-For` 是特意不发的**，同理：发了等于
+把用户的 IP 告诉上游，这个功能就白做了。
+
+整站模式的地址里带着主机名：
+
+    /api/proxy/<id>/__portal__/<http|https>/<主机[:端口]>/<路径>
+
+- **能转到哪些主机由白名单说了算，这是唯一的安全边界。** 主机名是从 URL 里来的，
+  谁登进来都能随手填一个，不拦的话这个代理就成了「想连哪台连哪台」的开放中继
+  （SSRF 中继），而门户多半正站在内网里。白名单 = 卡片地址的注册域（子域算数）
+  + 站点模块带的那几个（见下）+ 卡片上手填的「额外域名」，拼在
+  [proxyrewrite.py](backend/app/proxyrewrite.py) 的 `allow_for`。
+- 直接转发模式只认卡片自己那台机器，地址里塞不进主机名（老形状的链接继续认）。
+- 两种模式都只转 http/https（卡片填 `ssh://` 的也有，那种转不了）。
+- **要登录**，这是仓库里最该要登录的接口：它把门户的内网可达性借给了调用方。
+  WebSocket 上**不能**挂 `require_login`——它抛 HTTPException，握手这会儿没人接，
+  结果是 500 而不是干净的拒绝；那条路自己查一遍 Cookie，不对就按 1008 关掉。
+- **转给上游之前要把 `portal_session` 从 Cookie 里摘掉。** 上游页面在浏览器眼里
+  和门户同源，所以这枚 Cookie 会跟着发过来；原样转过去等于把登录门户那张票
+  交给内网那台机器。上游自己种的 Cookie 不受影响：它们的 `Path` 被改写成
+  `/api/proxy/<id>/`，只跟着自己这个服务走（不改的话几个系统的同名 Cookie 会互相顶掉，
+  表现成「开了 B 系统 A 系统就掉登录」）。http 门户下还要把 `Secure` 去掉、
+  `SameSite=None` 降成 `Lax`，不然浏览器直接不存。
+- **根绝对地址（`/static/x.js`）靠 Referer 兜底**，见 proxy.py 末尾的 `Fallback`：
+  Referer 说这次请求出自 `/api/proxy/<id>/…` 的页面，就 307 转回代理底下。
+  连 `/api/` 开头的也兜（只放过 `/api/proxy/` 自己）——上游系统自己也会有 `/api/xxx`，
+  不能被门户那几个接口截胡。**307 不能改成 308**：同一个 `/static/x.js` 好几个系统都有，
+  308 会被浏览器永久记住，串到另一个系统上去。
+- **`Fallback` 是纯 ASGI 中间件，别改回 `@app.middleware('http')`**：后者是
+  BaseHTTPMiddleware，会把响应体整个搬进队列再吐，而这个代理专门要转大文件下载和
+  SSE 长连接，经它一道就不流式了。
+- **页面里写死的完整地址在整站模式下会被改写**，分两道：
+  [proxyrewrite.py](backend/app/proxyrewrite.py) 改正文里的字面量（HTML/CSS/JS/JSON
+  都过一遍，`https:\/\/host` 这种转义写法也认），
+  [proxyhook.py](backend/app/proxyhook.py) 往页面 `<head>` 里注一段脚本，
+  运行时把 `fetch` / `XHR` / `WebSocket` / 元素的 `src`、`href` 全包一层。
+  直接转发模式一个字都不改（老行为原样留着）。
+- **JS 里 `"/"` 开头的字符串故意不改**：那大半是路由名、正则、模板，不是地址。
+  改错了页面还能跑，但行为悄悄变了，最难查。那一类交给注入的脚本在真要发请求时再判，
+  再兜不住就落到 `Fallback` 那条 Referer 兜底上。
+- **改写过的正文必须把 `integrity` 拆掉**：SRI 的哈希是按原文算的，改过就对不上，
+  浏览器会直接拒绝执行那个脚本，表现成整页白屏。
+- **`Referer` 和 `Origin` 要换成上游的真实地址**（两种模式都换）。上游拿它们做防盗链
+  和跨站校验，给一条门户的地址等于说「这是从一个不认识的站点点过来的」，
+  登录、下单那几步会被拒。换不回真实地址的就整条丢掉，别把门户的地址漏出去。
+- **响应里那几个讲源站规矩的首部要摘掉**（`_STRIP`）。最要命的是
+  `Strict-Transport-Security`：浏览器会把**门户**这个域名记成「只许 https」，
+  一记一年，http 部署的门户从此打不开，还得进浏览器设置删 HSTS 才清得掉。
+  `Content-Security-Policy` 是照着上游那个域名写的，搬到门户域名下只会拦到自己。
+- **`__Host-` / `__Secure-` 开头的 Cookie 要改名再发给浏览器**，回传时改回去。
+  这两种前缀要求 `Path=/` 和 `Secure`，而代理底下每张卡片的 Cookie 都钉在
+  `/api/proxy/<id>/`，条件对不上浏览器会**直接丢掉**，表现成「登录页转一圈又回到登录页」。
+- **Service Worker 在注入的脚本里被掐掉了**：它注册下来会横在所有请求前面按自己那套
+  改地址，和这里两道改写打架，而且装上之后要进浏览器设置才卸得掉。
+- **`verify=False`**：内网系统（PVE、群晖、带外管理口）基本都是自签证书，按标准校验
+  必然失败，而失败的表现是「这张卡片点了就报 502」，谁都想不到是证书。
+- **`read=None`（不设读超时）**：实时日志、SSE、长轮询都是一个请求挂很久。连接超时留着。
+- **`follow_redirects=False`**：跳转要交回浏览器，由它带着 Cookie 再来一趟，
+  地址栏才跟得上。`Location` 指向同一台机器时折回代理底下，指向别处的**原样留着**——
+  改写的话上游回一个 `Location: 任意地址` 门户就替人去访问了，又成了开放中继。
+- **`transfer-encoding` 必须滤掉**（逐跳首部）：httpx 交回来的已经是拆好块的字节，
+  把这个头带回去浏览器会照着再拆一遍，拿到一堆长度前缀。
+- **响应头走 `resp.headers.raw` 不走 `.items()`**：`Set-Cookie` 一次可能好几条，
+  字典形状只留得下最后一条。
+- **dev 下 vite 的 `/api` 代理要 `ws: true`**，否则带 web 终端、实时日志的页面
+  只在 dev 卡在「连接中」，部署态是同源又好的，查起来会以为是后端的问题。
+- `websockets` 是 uvicorn[standard] 顺带装的，不在 requirements 里写明，所以 import
+  写在函数里（和 tray.py 一个路数）；它 13 之前叫 `extra_headers`，14 之后叫
+  `additional_headers`，两个名字都认。
+
+#### 一个站一个文件：[proxy_webside/](backend/app/proxy_webside/)
+
+通用那两道对谁都一样，但具体到某个站总有几条只属于它的事（资源在哪几个域名上、
+要不要按日语要页面、Next.js 那种把当前路径塞进首部的要还原）。这些堆进 proxy.py 会
+很快变成一坨 if-else，所以**一个站一个 py 文件**，`__init__.py` 只负责按卡片地址的
+主机名把模块找出来（后缀最长的赢，`auctions.yahoo.co.jp` 和
+`paypayfleamarket.yahoo.co.jp` 是两个站，别互相认领）。
+
+现在有 `mercari.py`、`yahoo_auctions.py`、`paypayfleamarket.py`，
+两个雅虎站共用的域名清单在 `_yahoo.py`（下划线开头 = 不是站点模块，不进 `_MODULES`）。
+模块里 `NAME` / `DOMAINS` / `HOSTS` / `BROWSER_JS` / `on_request` / `on_response` /
+`on_html` 都是可选的，缺了就当没有；钩子抛异常只打一行日志，不会把请求带崩——
+这些文件记的是「某个站现在这么写」，改版之后随时可能对不上。
+
+- **被认领的卡片自动按整站办**，哪怕卡片上选的是「直接转发」：这里躺着的本来就是
+  直接转发必坏的那几个站，认出来了还按直接转发办，只会让人对着半张页面查半天。
+- **`_MODULES` 和 [portal.spec](portal.spec) 的 `hiddenimports` 都是写死的清单，
+  新加站点文件两处都要加。** 前者别改成 pkgutil 扫目录、后者别改成
+  `collect_submodules`：PyInstaller 靠静态分析决定打包什么，动态导入它看不见，
+  表现成「源码跑得好好的，exe 里那个站只剩通用规则」，而且不报错。
+
+#### 整站模式够不着的地方（知道就行，别指望）
+
+- **`location.href = '...'` 这类赋值拦不住**：`Location` 的属性是 unforgeable，
+  脚本改不了。字面量改写能覆盖大半，再兜不住就落到 `Fallback` 上。
+- **门户最好挂在 https 下**。站点里 `if (location.protocol !== 'https:')` 然后自己跳转的
+  写法不少，http 门户下会跳到一个不存在的地方。（`cookie_secure` 同理。）
+- **按域名发牌的第三方过不了**（reCAPTCHA 那类）：域名对不上，代理与否都一样。
+- **Worker 里没有注入的那段脚本**，正文改写只覆盖它里面的完整地址字面量。
+- **单标签主机名（`http://nas/`）的完整地址改不着**：正文改写要求主机名里带点，
+  不然 JS 源码里的 `// 这是注释` 会被当成协议相对地址改坏。根绝对和相对地址不受影响。
+- **被代理的页面和门户同源**，它里面的脚本能拿门户的会话去调 `/api/nav`。
+  `Fallback` 顺手挡了一道（带 Referer 的 `/api/xxx` 会被转回代理底下），但绕得开。
+  内网后台是自己人，公网站点可就不是了——真要紧的站别和门户放在一起。
 
 ### 图标缓存是磁盘目录，不进 conf.json
 

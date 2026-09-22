@@ -8,8 +8,12 @@ import vue from '@vitejs/plugin-vue'
  */
 const BACKEND = process.env.PORTAL_BACKEND || 'http://127.0.0.1:9921'
 
+// ws: true 是给门户代理用的（/api/proxy/<卡片 id>，见 app/proxy.py）：
+// 被代理的内网系统里带 web 终端、实时日志的不少，不转 WebSocket 的话 dev 下那些页面
+// 会一直卡在「连接中」，而部署态是同源、压根没有这一层，查起来会以为是后端的问题。
+// vite 自己的 HMR 走的是另一个路径，不受这条影响
 const proxy = {
-  '/api': { target: BACKEND, changeOrigin: false }
+  '/api': { target: BACKEND, changeOrigin: false, ws: true }
 }
 
 export default defineConfig({

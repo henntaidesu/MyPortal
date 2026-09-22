@@ -98,13 +98,33 @@ async function pull() {
   return res.data
 }
 
+/**
+ * 门户代理那一栏有三挡（见 app/proxy.py）：
+ *
+ *   false    关
+ *   true     开，直接转发——只转卡片这一台机器，正文一个字不改。内网后台用这个
+ *   'site'   开，整站改写——一张卡片转一整族域名，还会改写页面里的地址。
+ *            公网站点（メルカリ、ヤフオク 这些）图和接口散在别的域名上，得用这个
+ *
+ * 存下去的就是这三个值，后端照着它分路。老数据里是布尔值，认得出来。
+ */
+function proxyMode(v) {
+  return v === 'site' ? 'site' : !!v
+}
+
 function normalizeItem(i) {
   return {
     id: i.id || uid(),
     name: i.name || '未命名',
     url: normalizeUrl(i.url),
     desc: i.desc || '',
-    icon: i.icon || ''
+    icon: i.icon || '',
+    // 开了就不直接连 url，改走 /api/proxy/<id>，由门户那个进程转出去（见 app/proxy.py）。
+    // 后端的 navstore.clean 不管卡片有哪些字段，所以加字段只用改这儿
+    proxy: proxyMode(i.proxy),
+    // 整站模式下额外放行的域名（逗号隔开）。站点自己那几个域名后端有一份内置的
+    // （app/proxy_webside/），这里填的是补充
+    proxyHosts: typeof i.proxyHosts === 'string' ? i.proxyHosts : ''
   }
 }
 
@@ -263,7 +283,9 @@ export function addItem(gid, payload) {
     name: payload.name.trim(),
     url: payload.url,
     desc: (payload.desc || '').trim(),
-    icon: (payload.icon || '').trim()
+    icon: (payload.icon || '').trim(),
+    proxy: proxyMode(payload.proxy),
+    proxyHosts: (payload.proxyHosts || '').trim()
   }))
 }
 
@@ -276,6 +298,8 @@ export function updateItem(gid, id, payload) {
   item.url = normalizeUrl(payload.url)
   item.desc = (payload.desc || '').trim()
   item.icon = (payload.icon || '').trim()
+  item.proxy = proxyMode(payload.proxy)
+  item.proxyHosts = (payload.proxyHosts || '').trim()
 
   const to = payload.group && payload.group !== gid ? findGroup(payload.group) : null
   if (to) {

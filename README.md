@@ -156,8 +156,16 @@ backend/
     ├── navstore.py         conf.json 里 nav 那一段的读写与校验
     ├── icon.py             站点图标代理
     ├── iconcache.py        图标的磁盘缓存
+    ├── proxy.py            门户代理：转发、首部与 Cookie 改写、WebSocket
+    ├── proxyrewrite.py     整站模式：改写正文里的地址、域名白名单
+    ├── proxyhook.py        整站模式：注入页面的那段运行时脚本
     ├── logwindow.py        打包后的运行窗口
     ├── tray.py             打包后的托盘图标
+    ├── proxy_webside/      一个站一个文件的特化规则
+    │   ├── _yahoo.py       两个雅虎站共用的域名清单
+    │   ├── mercari.py      メルカリ
+    │   ├── yahoo_auctions.py      ヤフオク!
+    │   └── paypayfleamarket.py    PayPayフリマ
     └── routers/
         ├── auth.py         /api/login /api/me /api/logout
         └── nav.py          /api/nav 的 GET / PUT

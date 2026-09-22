@@ -51,10 +51,35 @@ hiddenimports = [
     # 真的 import 一遍每个模块，副作用（比如 app.config 生成 conf.json）会落到
     # 构建机器上，而不是跑 exe 的那台。
     'app', 'app.main', 'app.config', 'app.auth', 'app.navstore',
-    'app.icon', 'app.iconcache',
+    'app.icon', 'app.iconcache', 'app.proxy',
+    'app.proxyrewrite', 'app.proxyhook',     # 整站代理的正文改写和注入脚本
     'app.routers', 'app.routers.auth', 'app.routers.nav',
     'app.logwindow', 'app.tray',     # 桌面外壳，见下面那段
+
+    # 各站的特化规则。**新写一个站点文件就要在这儿加一行**——这一串是显式列的
+    # （理由见上面那段），漏了的话源码态好好的，exe 里那个站就只剩通用规则：
+    # 图和接口在别的域名上的站点会变成「页面打得开，图全裂」。
+    'app.proxy_webside',
+    'app.proxy_webside._yahoo',
+    'app.proxy_webside.mercari',
+    'app.proxy_webside.paypayfleamarket',
+    'app.proxy_webside.yahoo_auctions',
 ]
+
+# 门户代理（app/proxy.py）转 WebSocket 时用的是 websockets 的**客户端**。
+# 光列 'websockets' 不够：这个包的 __init__ 是个 __getattr__ 懒加载壳子，
+# websockets.connect 真身在下面这些子模块里，静态分析跟不进去。
+# 漏了的话源码态一切正常，只有 exe 里的 WebSocket 代理会挂——而且要到现场
+# 打开带 web 终端的页面才发现。
+# 两套都探一遍：13 之前只有 legacy，14 之后是 asyncio 那套，装的是哪版就列哪个。
+import importlib.util
+
+for _mod in ('websockets.asyncio.client', 'websockets.legacy.client', 'websockets.client'):
+    try:
+        if importlib.util.find_spec(_mod) is not None:
+            hiddenimports.append(_mod)
+    except (ImportError, ValueError):
+        pass
 
 # 桌面外壳（app/logwindow.py / app/tray.py）的依赖。它们的
 # import 全写在函数里——源码态起服务不该为了一个托盘图标去装 pystray——静态分析

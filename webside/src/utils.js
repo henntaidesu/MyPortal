@@ -16,6 +16,18 @@ export function getHost(url) {
   }
 }
 
+/**
+ * 开了「门户代理」的卡片该点去哪。后端拿这个 id 回 nav 里查出真正的地址
+ * （见 app/proxy.py），所以这里只拼 id，不把目标地址塞进 URL——
+ * 塞进去的话这个代理对任何登录者都成了「想连哪台连哪台」。
+ *
+ * 路径和查询串也不在这儿补：/api/proxy/<id> 会由后端跳到带路径的那条，
+ * 卡片地址改了之后不会有一份老路径留在链接里。
+ */
+export function proxyUrl(item) {
+  return '/api/proxy/' + encodeURIComponent(item.id)
+}
+
 export function getOrigin(url) {
   try {
     return new URL(normalizeUrl(url)).origin

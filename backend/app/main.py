@@ -15,9 +15,10 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import iconcache, navstore
+from . import iconcache, navstore, proxy
 from .config import AUTH_USERNAME, CONF_PATH, DIST_DIR, HOST, PORT, uses_default_password
 from .icon import router as icon_router
+from .proxy import router as proxy_router
 from .routers.auth import router as auth_router
 from .routers.nav import router as nav_router
 
@@ -36,6 +37,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     iconcache.purge()
     print(f'[portal] 导航数据 {navstore.describe()}')
     print(f'[portal] 图标缓存 {iconcache.describe()}')
+    print(f'[portal] 门户代理 {proxy.describe()}')
     if uses_default_password():
         # 故意每次启动都喊。谁能打开这个门户，谁就能改掉这一页所有人的入口
         print(f'[portal] !! 账号 {AUTH_USERNAME} 还在用默认口令，'
@@ -47,13 +49,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+        await proxy.shutdown()      # 转发用的那个连接池
 
 
 app = FastAPI(title='Portal', version='2.0.0', lifespan=lifespan)
 
+# 被代理页面里的根绝对地址（/static/x.js）靠它转回 /api/proxy/<id>/ 底下，
+# 见 app/proxy.py 末尾。中间件比路由先跑，所以这行放哪儿都行，放在这里只是挨着路由
+app.add_middleware(proxy.Fallback)
+
 app.include_router(auth_router)
 app.include_router(icon_router)
 app.include_router(nav_router)
+app.include_router(proxy_router)
 
 
 @app.get('/healthz', include_in_schema=False)

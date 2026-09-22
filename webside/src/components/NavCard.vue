@@ -1,20 +1,31 @@
 <script setup>
 import { computed } from 'vue'
 import NavIcon from './NavIcon.vue'
-import { getHost } from '../utils'
+import { getHost, proxyUrl } from '../utils'
 
 const props = defineProps({ item: { type: Object, required: true } })
 const emit = defineEmits(['edit', 'remove'])
 
 const host = computed(() => getHost(props.item.url))
+
+/* 开了门户代理就点去 /api/proxy/<id>，由后端转出去（见 app/proxy.py）。
+   原地址不显示在链接上了，但 title 里照样写着——不然鼠标停上去看不出这张卡片指着哪台机器 */
+const href = computed(() => (props.item.proxy ? proxyUrl(props.item) : props.item.url))
+/* 两种代理模式点开的东西不一样，标签上分得开：出问题时先看这张卡片走的是哪一种 */
+const mode = computed(() => (props.item.proxy === 'site' ? '整站' : '代理'))
+const hint = computed(() =>
+  props.item.proxy ? `${props.item.url}（经门户代理·${mode.value}）` : props.item.url)
 </script>
 
 <template>
-  <a class="card" :href="item.url" target="_blank" rel="noopener" :title="item.url">
+  <a class="card" :href="href" target="_blank" rel="noopener" :title="hint">
     <NavIcon :item="item" :size="52" />
     <div class="meta">
       <div class="name">
         <span class="txt">{{ item.name }}</span>
+        <!-- 走不走代理在页面上得看得出来：两者点开的地址不是一回事，出问题时
+             第一件要确认的就是这个 -->
+        <span v-if="item.proxy" class="tag" :title="hint">{{ mode }}</span>
       </div>
       <div class="desc">{{ item.desc || host }}</div>
     </div>
@@ -53,6 +64,15 @@ const host = computed(() => getHost(props.item.url))
   white-space: nowrap;
 }
 .txt { overflow: hidden; text-overflow: ellipsis; }
+.tag {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--primary) 14%, transparent);
+  color: var(--primary);
+  font-size: 11px;
+  font-weight: 500;
+}
 .desc {
   margin-top: 5px;
   color: var(--text-3);
