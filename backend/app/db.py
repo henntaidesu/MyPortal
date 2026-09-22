@@ -270,6 +270,38 @@ _DDL = [
         REFERENCES nav_groups (id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
+    """
+    CREATE TABLE IF NOT EXISTS proxy_cookies (
+      id         BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      user_id    BIGINT UNSIGNED NOT NULL,
+      -- 卡片的 client_id。**不指向 nav_items.id**：存一次导航是「整棵树删掉重插」，
+      -- 自增主键每次都变，挂外键的话每存一次导航就把人家的登录态清空了
+      item_id    VARCHAR(64)     NOT NULL,
+      -- SHA-256(域 \\0 路径 \\0 名字)。三样直接进唯一索引的话，utf8mb4 下
+      -- 255*3 个字符要 3060 字节，加上前两列就超过 InnoDB 那 3072 字节的上限了
+      scope_hash BINARY(32)      NOT NULL,
+      name       VARCHAR(255)    NOT NULL,
+      -- AES-GCM 密文（app/secretbox.py）。这一列等同于用户在外部站点的登录凭证，
+      -- 明文存的话一份数据库备份就够别人冒充他登进那些站点
+      value      VARBINARY(4096) NOT NULL,
+      domain     VARCHAR(255)    NOT NULL,
+      host_only  TINYINT(1)      NOT NULL DEFAULT 0,
+      path       VARCHAR(255)    NOT NULL DEFAULT '/',
+      -- NULL = 会话 Cookie。浏览器关掉就丢，而罐子的意义正是替它记住
+      expires_at BIGINT          NULL,
+      secure     TINYINT(1)      NOT NULL DEFAULT 0,
+      http_only  TINYINT(1)      NOT NULL DEFAULT 0,
+      same_site  VARCHAR(8)      NOT NULL DEFAULT '',
+      updated_at TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP
+                                 ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      UNIQUE KEY uk_cookie (user_id, item_id, scope_hash),
+      KEY idx_cookie_card (user_id, item_id),
+      KEY idx_cookie_expiry (expires_at),
+      CONSTRAINT fk_cookie_user FOREIGN KEY (user_id)
+        REFERENCES users (id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Cookie 代理：外部站点的登录态'
+    """,
 ]
 
 

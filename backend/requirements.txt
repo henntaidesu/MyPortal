@@ -6,3 +6,8 @@ httpx>=0.27
 # 装的时候不用编译、不用先装 MySQL 的开发库，PyInstaller 也能靠静态分析打进 exe。
 # 见 backend/app/db.py 顶上那段。
 PyMySQL>=1.1
+
+# Cookie 代理把上游站点的登录态加密存进库里（backend/app/secretbox.py）用的 AES-GCM。
+# 这是唯一一个带 C 扩展的依赖，但它有现成的 wheel，PyInstaller 也自带 hook。
+# 没装的话只是 Cookie 代理那个功能自己关掉，门户照常跑。
+cryptography>=42

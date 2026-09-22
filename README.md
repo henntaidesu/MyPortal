@@ -28,7 +28,7 @@ Portal/
 ```bash
 # 后端
 cd backend
-pip install -r requirements.txt   # 只需第一次：fastapi + uvicorn + httpx + PyMySQL
+pip install -r requirements.txt   # 只需第一次，见 backend/requirements.txt
 python -m app.main                # http://localhost:9921
 
 # 前端（另开一个窗口）
@@ -119,6 +119,31 @@ Okta、Auth0、Google 等。在 `conf.json` 里填：
 
 改完刷新即刻生效，不用重启。**只有卡片的主人能通过它转发**，
 别人拿到卡片 id 也打不开。
+
+### Cookie 代理
+
+开了门户代理之后，卡片上还多一栏「Cookie 代理」。打开它，**那个站点的登录态就
+存在门户的服务器上**，而不是只存在你当前这个浏览器里：
+
+- 登录一次，之后换台电脑、换个浏览器、清掉浏览器数据，进去**还是登录状态**
+- 手机上打开门户，外部站点也已经登好了
+- Safari 那种会把脚本种的 Cookie 压到 7 天的限制也绕开了
+
+适合那些老是掉登录、又不好用密码管理器自动填的外部站点。
+
+卡片编辑框里会显示「已保存 N 条」，旁边有个「清除」——**清除就等于退出那个站点的
+登录**。把开关关掉再保存也会一并清掉。
+
+> **这一栏要想清楚再开。** 存下来的东西等同于你在那个站点的登录凭证。它们在库里
+> 是加密的（AES-GCM，密钥在库里那把签名密钥派生），但门户进程本身必须解得开才能
+> 替你发出去——所以**谁能登进你这个门户账号，谁就能以你的身份用那个站点**。
+> 门户账号的口令要认真设，能上 https 就上 https。
+>
+> 每个人、每张卡片一个独立的罐子，别人看不到也用不了你的。
+> 两张卡片指同一个站算两份，要各自登一次（这样才装得下「我的号」和「公司的号」）。
+>
+> 这个功能要 `cryptography` 这个包。没装的话它会自动关掉，门户其余部分照常跑，
+> 启动日志里会说一句。
 
 ## conf.json
 
@@ -232,6 +257,8 @@ backend/
     ├── main.py             组装路由 + 托管 dist
     ├── config.py           conf.json 的读写，算各种路径
     ├── db.py               MySQL 连接池 + 建表
+    ├── cookiejar.py        Cookie 代理：上游登录态的存取与匹配
+    ├── secretbox.py        上面那些值的加密（AES-GCM）
     ├── users.py            用户表：口令哈希、角色、OIDC 绑定
     ├── auth.py             会话签名 Cookie、登录校验、失败限流
     ├── oidc.py             OIDC 单点登录（授权码 + PKCE）
@@ -252,6 +279,7 @@ backend/
         ├── auth.py         /api/me /api/login /api/logout /api/auth/oidc/*
         ├── account.py      /api/account：改自己的显示名、口令、踢自己下线
         ├── users.py        /api/users：用户管理（管理员）
+        ├── cookies.py      /api/cookies：看/清 Cookie 代理存的登录数据
         └── nav.py          /api/nav 的 GET / PUT
 
 pyinstaller.bat             打包：构建前端 + 打出单文件 Portal.exe

@@ -34,6 +34,16 @@
 `app/proxy_webside/` 里某个站点模块认领了，`proxy: true` 会**自动按整站办**——
 那几个站直接转发必然是坏的，没必要让人再去卡片上改一次。
 
+## Cookie 代理（卡片上另一个开关）
+
+卡片上把「Cookie 代理」也打开之后，上游的登录态**存在服务器上**，而不是只存在
+浏览器里：发给上游的 `Cookie` 头以服务器那个罐子为准，上游的 `Set-Cookie`
+既进罐子也照常交给浏览器。换设备、换浏览器、清缓存都不掉登录。
+罐子和挑选规则在 app/cookiejar.py，加密在 app/secretbox.py。
+
+这里只有三个接点：`_cookie_out()`（请求侧，合并罐子和浏览器那两份）、
+`_save_cookies()`（响应侧）、以及 WebSocket 握手那一处。
+
 ## 这里不做
 
 - **不缓存**：转发的是人家系统的动态页面，缓存策略原样带回去，由浏览器认。
@@ -65,7 +75,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, WebSoc
 from fastapi.responses import RedirectResponse, StreamingResponse
 from starlette.background import BackgroundTask
 
-from . import navstore, proxy_webside as webside, proxyrewrite
+from . import cookiejar, navstore, proxy_webside as webside, proxyrewrite, secretbox
 from .auth import COOKIE_NAME, client_ip, require_login, user_from_token
 from .config import COOKIE_SECURE
 from .proxyrewrite import MARK, Rewriter
@@ -142,6 +152,7 @@ class Target(NamedTuple):
     site: bool                      # 整站模式
     allow: tuple[str, ...]          # 整站模式下允许转发的域名后缀
     module: Any                     # app/proxy_webside/ 里认领它的模块，没有就是 None
+    jar: bool                       # Cookie 代理：上游的登录态存服务器（app/cookiejar.py）
 
     @property
     def mount(self) -> str:
@@ -204,8 +215,11 @@ def _to_target(item: object) -> Optional[Target]:
     site = str(item.get('proxy')).lower() == 'site' or module is not None
     allow = proxyrewrite.allow_for(parts.netloc, webside.hosts_of(module),
                                    item.get('proxyHosts')) if site else ()
+    # cryptography 没装时整个功能自己关掉（见 app/secretbox.py）——存不了就别存，
+    # 明文落库比不做这个功能更糟
+    jar = bool(item.get('cookieJar')) and secretbox.available()
     return Target(item_id, url, parts.scheme, parts.netloc,
-                  f'{parts.scheme}://{parts.netloc}', site, allow, module)
+                  f'{parts.scheme}://{parts.netloc}', site, allow, module, jar)
 
 
 def _target(user_id: int, item_id: str) -> Target:
@@ -337,6 +351,57 @@ def _cookies_up(cookie: str) -> str:
     return '; '.join(kept)
 
 
+def _cookie_out(request_cookie: str, target: Target, user_id: int,
+                scheme: str, host: str, path: str) -> str:
+    """发给上游的 `Cookie` 头。没开 Cookie 代理时就是收拾过的浏览器那份。
+
+    开了之后**以服务器那个罐子为准**，浏览器那份里只有罐子没有的名字才补进来。
+    两份都留着的原因分两头：
+
+      - 罐子优先，是因为浏览器那份可能是上次清数据前的陈货，或者干脆是别的设备
+        留下的；而罐子里那份是上游最近一次实际发下来的。
+      - 浏览器那份仍然补，是因为页面里的脚本会拿 `document.cookie` 自己种东西
+        （语言、时区、A/B 分桶之类）。那些从来不经过 `Set-Cookie`，罐子里没有，
+        丢掉的话页面会每次都重新问一遍。
+    """
+    browser = _cookies_up(request_cookie)
+    if not target.jar:
+        return browser
+
+    jar = cookiejar.header_for(cookiejar.load(user_id, target.item_id), scheme, host, path)
+    if not jar:
+        return browser
+    if not browser:
+        return jar
+
+    taken = {part.split('=', 1)[0].strip() for part in re.split(r';\s*', jar) if part}
+    extra = [part for part in re.split(r';\s*', browser)
+             if part and part.split('=', 1)[0].strip() not in taken]
+    return '; '.join([jar, *extra]) if extra else jar
+
+
+def _save_cookies(resp: httpx.Response, target: Target, user_id: int,
+                  host: str, path: str) -> None:
+    """把这次响应里的 `Set-Cookie` 收进罐子。存不下去也不能把请求带崩。
+
+    走 `resp.headers.raw`：一次响应里 `Set-Cookie` 可能有好几条，字典形状只留得下
+    最后一条——表现成「明明登录成功了，下次进来还是没登录」，因为真正管用的那枚
+    正好不是最后一条。
+    """
+    if not target.jar:
+        return
+    raw = [value.decode('latin-1') for name, value in resp.headers.raw
+           if name.lower() == b'set-cookie']
+    if not raw:
+        return
+    try:
+        cookiejar.store(user_id, target.item_id, raw, host, path)
+    except Exception as exc:                          # noqa: BLE001
+        # 库写不进去（连接断了、磁盘满了）不该让人手里这个页面跟着 500。
+        # 代价只是这次的登录态没记住，下次重登一遍
+        print(f'[Cookie 代理] 卡片 {target.item_id} 存登录数据失败: {exc}')
+
+
 def _fetch_site(referer: str, scheme: str, host: str) -> str:
     """重算 `Sec-Fetch-Site`。
 
@@ -358,15 +423,18 @@ def _fetch_site(referer: str, scheme: str, host: str) -> str:
 
 
 def _request_headers(request: Request, target: Target, scheme: str, host: str,
-                     rewriter: Optional[Rewriter]) -> list[tuple[str, str]]:
+                     rewriter: Optional[Rewriter], user_id: int = 0,
+                     path: str = '/') -> list[tuple[str, str]]:
     referer = _real_url(target, request.headers.get('referer', ''))
     out: list[tuple[str, str]] = []
+    seen_cookie = False
     for name, value in request.headers.items():
         low = name.lower()
         if low in _HOP or low in _FORWARDED or low == 'host':
             continue
         if low == 'cookie':
-            value = _cookies_up(value)
+            seen_cookie = True
+            value = _cookie_out(value, target, user_id, scheme, host, path)
             if not value:
                 continue
         elif low == 'referer':
@@ -382,6 +450,13 @@ def _request_headers(request: Request, target: Target, scheme: str, host: str,
         elif low == 'sec-fetch-site' and target.site:
             value = _fetch_site(referer, scheme, host)
         out.append((name, value))
+
+    if target.jar and not seen_cookie:
+        # 浏览器一条 Cookie 都没带（第一次进、或者刚清过数据）时上面那个分支根本不会走到，
+        # 而这恰恰是 Cookie 代理最该出场的时候——罐子里那份得自己补上来
+        jar = _cookie_out('', target, user_id, scheme, host, path)
+        if jar:
+            out.append(('cookie', jar))
 
     # content-length 特意留着（上面没滤）：httpx 见到请求头里已经有它，就不会再给
     # 这个流式请求体加一个 Transfer-Encoding: chunked——有些老后台认不得 chunked 上传
@@ -570,9 +645,11 @@ async def forward(item_id: str, path: str, request: Request,
     if query:
         url += '?' + (_clean_query(query, rewriter) if rewriter else query)
 
+    up_path = '/' + rest.split('?', 1)[0]
     ctx = webside.Ctx(item_id, target.mount, target.base, scheme, host,
-                      '/' + rest.split('?', 1)[0], request.method)
-    headers = _request_headers(request, target, scheme, host, rewriter)
+                      up_path, request.method)
+    headers = _request_headers(request, target, scheme, host, rewriter,
+                               int(user['id']), up_path)
     webside.on_request(target.module, ctx, headers)
 
     # 有没有请求体，看调用方自己说了什么，不按方法猜：GET 带体、POST 不带体都是有的。
@@ -589,6 +666,10 @@ async def forward(item_id: str, path: str, request: Request,
         resp = await client.send(upstream, stream=True)
     except httpx.HTTPError as exc:
         raise HTTPException(502, f'门户连不上 {scheme}://{host}：{exc}') from None
+
+    # 存罐子挂在这一句：底下有「改写后整份发」和「流式转」两条出路，
+    # 挂在这儿两条都覆盖得到，挂到 _response_headers 里则会被调用两次
+    _save_cookies(resp, target, int(user['id']), host, up_path)
 
     if rewriter is not None and request.method != 'HEAD' and resp.status_code not in (204, 304):
         rewritten = await _rewritten(resp, target, ctx, rewriter, scheme, host)
@@ -729,7 +810,9 @@ async def forward_ws(ws: WebSocket, item_id: str, path: str):
     if ws.url.query:
         url += '?' + ws.url.query
 
+    ws_path = '/' + rest.split('?', 1)[0]
     headers = []
+    seen_cookie = False
     for name, value in ws.headers.items():
         low = name.lower()
         # sec-websocket-* 和 upgrade 那几个由 websockets 自己重新握手时生成，
@@ -737,7 +820,10 @@ async def forward_ws(ws: WebSocket, item_id: str, path: str):
         if low in _HOP or low in _FORWARDED or low == 'host' or low.startswith('sec-websocket-'):
             continue
         if low == 'cookie':
-            value = _cookies_up(value)
+            seen_cookie = True
+            # WebSocket 这条也要带罐子里那份：带实时推送的站点多半在握手时就查登录，
+            # 只给 HTTP 那条接上的话，页面本身打得开，实时那块一直「连接中」
+            value = _cookie_out(value, target, int(user['id']), scheme, host, ws_path)
             if not value:
                 continue
         elif low == 'origin':
@@ -750,6 +836,10 @@ async def forward_ws(ws: WebSocket, item_id: str, path: str):
                 continue
             value = real
         headers.append((name, value))
+    if target.jar and not seen_cookie:
+        jar = _cookie_out('', target, int(user['id']), scheme, host, ws_path)
+        if jar:
+            headers.append(('cookie', jar))
     if not target.site:
         headers.append(('x-forwarded-for', client_ip(ws)))
 

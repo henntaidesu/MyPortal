@@ -2,6 +2,7 @@
 import { reactive, ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import NavIcon from './NavIcon.vue'
 import { state, addItem, updateItem } from '../store'
+import { api } from '../api'
 import { getHost, normalizeUrl } from '../utils'
 
 const props = defineProps({
@@ -20,11 +21,36 @@ const form = reactive({
   // 走不走门户代理：false 关 / true 直接转发 / 'site' 整站改写，见 app/proxy.py
   proxy: props.item?.proxy === 'site' ? 'site' : !!props.item?.proxy,
   proxyHosts: props.item?.proxyHosts || '',
+  // 开了就把上游站点的登录态存在服务器上（见 app/cookiejar.py），换设备也不用重登
+  cookieJar: !!props.item?.cookieJar,
   group: props.group.id          // 改成别的分类就等于把这张卡片搬过去
 })
 
 const error = ref('')
 const nameInput = ref(null)
+
+/* 这张卡片在服务器上存了多少条登录数据。只有编辑已有卡片时才问得出来——
+   新卡片还没有 id，罐子也就无从谈起 */
+const jar = ref(null)
+
+async function loadJar() {
+  if (!props.item?.id) return
+  try {
+    jar.value = await api('/api/cookies/' + encodeURIComponent(props.item.id))
+  } catch {
+    jar.value = null          // 问不到就不显示那一行，不值得为它弹个错
+  }
+}
+
+async function clearJar() {
+  if (!confirm('清除已保存的登录数据？下次打开这张卡片要重新登录一次。')) return
+  try {
+    await api('/api/cookies/' + encodeURIComponent(props.item.id), { method: 'DELETE' })
+    await loadJar()
+  } catch (e) {
+    error.value = '清除失败：' + (e?.message || '未知错误')
+  }
+}
 
 // 先填地址没填名字时，用域名兜底
 watch(() => form.url, (v) => {
@@ -45,6 +71,7 @@ function onKey(e) {
 onMounted(() => {
   window.addEventListener('keydown', onKey)
   nameInput.value?.focus()
+  loadJar()
 })
 onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 </script>
@@ -95,6 +122,30 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
           <option value="site">开启 · 整站（公网站点）</option>
         </select>
       </label>
+
+      <!-- 只有开了门户代理才有意义，所以关着的时候整栏不占位置。
+           形状和上面两栏一致（标题 + 一个下拉框），不用勾选框，理由同上 -->
+      <template v-if="form.proxy">
+        <label class="field">
+          <span class="lb">Cookie 代理</span>
+          <select v-model="form.cookieJar">
+            <option :value="false">关闭</option>
+            <option :value="true">开启 · 登录态存在服务器</option>
+          </select>
+        </label>
+        <p v-if="form.cookieJar" class="jar">
+          <span>
+            登录一次之后，换设备、换浏览器、清缓存都不用重登。
+            <strong>登录凭证会加密存在门户的数据库里</strong>，
+            谁能登进这个门户账号，谁就能以你的身份用那个站点。
+          </span>
+          <span v-if="jar && jar.available === false" class="warn">{{ jar.reason }}</span>
+          <span v-else-if="jar && jar.count" class="saved">
+            已保存 {{ jar.count }} 条（{{ jar.domains.join('、') }}）
+            <button type="button" class="link" @click="clearJar">清除</button>
+          </span>
+        </p>
+      </template>
 
       <!-- 只有整站模式用得上，所以平时不占位置。站点自己那几个域名后端内置了一份
            （app/proxy_webside/），这里填的是补充：图或接口在别的域名上、又没内置时才要填 -->
@@ -169,6 +220,25 @@ h3 { margin: 0 0 16px; font-size: 16px; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.jar {
+  margin: 8px 0 0;
+  padding: 9px 11px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text-3);
+  font-size: 12px;
+  line-height: 1.55;
+}
+.jar strong { color: var(--text-2); font-weight: 600; }
+.jar .saved, .jar .warn { display: block; margin-top: 6px; }
+.jar .warn { color: var(--danger); }
+.jar .link {
+  padding: 0 0 0 4px;
+  color: var(--danger);
+  font-size: 12px;
+  text-decoration: underline;
+}
+
 .field { display: block; margin-top: 12px; }
 .lb {
   display: flex;

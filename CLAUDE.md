@@ -17,7 +17,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `portal_meta` 放签名密钥和迁移标记。conf.json 只剩连接串、监听地址、OIDC 参数。
 
 **每个人看到的是自己那份导航**，互相看不见，卡片 id 也不是全局的
-（两个人撞同一个 id 是允许的）。
+（两个人撞同一个 id 是允许的）。卡片上还能开 **Cookie 代理**——把外部站点的
+登录态加密存在服务器上，换设备、清缓存都不用重登（见门户代理那一节）。
 
 ## 常用命令
 
@@ -31,7 +32,7 @@ start.bat
 
 # 后端：必须在 backend/ 目录下执行，代码用的是相对包 app
 cd backend
-pip install -r requirements.txt   # fastapi + uvicorn + httpx + PyMySQL，就这四个
+pip install -r requirements.txt   # fastapi + uvicorn + httpx + PyMySQL + cryptography
 python -m app.main                # http://localhost:9921
 
 # 前端：必须在 webside/ 目录下执行
@@ -95,6 +96,7 @@ pyinstaller.bat                   # 产物 Releases\<版本>\Portal.exe
 
 ### 数据库：五张表，PyMySQL 直连，自己写 SQL
 
+（加上 Cookie 代理那张 `proxy_cookies` 其实是六张。）
 表结构在 [db.py](backend/app/db.py) 的 `_DDL` 里，全是 `CREATE TABLE IF NOT EXISTS`，
 每次启动跑一遍。库不存在会先 `CREATE DATABASE`，所以部署时不用手工建库。
 
@@ -344,6 +346,55 @@ pyinstaller.bat                   # 产物 Releases\<版本>\Portal.exe
   写在函数里（和 tray.py 一个路数）；它 13 之前叫 `extra_headers`，14 之后叫
   `additional_headers`，两个名字都认。
 
+#### Cookie 代理：上游的登录态存在服务器上
+
+卡片上另一个开关（`cookieJar`，存在 `nav_items.extra` 里，和 `proxyHosts` 一样）。
+开了之后走这张卡片的请求就有一个**服务器端的 Cookie 罐子**
+（[cookiejar.py](backend/app/cookiejar.py)，`proxy_cookies` 表）：
+
+    上游 Set-Cookie ──> 存进罐子（加密）──> 也照常改写后交给浏览器
+    发给上游的请求  <── 从罐子里按 RFC 6265 挑出该带的那几枚
+
+解决的是浏览器那份靠不住：清一次数据全没、换台设备要重登、Safari 那类还会把
+脚本种的 Cookie 压到 7 天。**这是唯一一个让「换设备不掉登录」成立的地方。**
+
+- **一张卡片一个罐子，钉在 `(user_id, item_id)` 上。** 两张卡片指同一个站算两个罐子——
+  按域名合并的话「我的号」和「公司的号」会互相顶掉，而那正是有人开两张卡片的理由。
+- **`item_id` 存的是前端那个 client_id，不能挂外键指向 `nav_items.id`**：
+  存一次导航是「整棵树删掉重插」，自增主键每次都变，挂外键等于每存一次导航
+  就把人家的登录态清空一次。代价是要自己收尾，见下一条。
+- **卡片删了、或者开关关了，罐子要跟着收掉**（`cookiejar.retain`，在存导航那个
+  事务里调）。不收的话：删了卡片登录数据还躺在库里；关掉开关又打开还是登录态，
+  那个开关就成了摆设。
+- **值一律 AES-GCM 加密**（[secretbox.py](backend/app/secretbox.py)），密钥从
+  `portal_meta` 那把签名密钥 HKDF 派生，不是配置项。AAD 是
+  `<用户>:<卡片>:<Cookie 名>`，所以改库的人也没法把 A 的那行抄到 B 名下。
+  **解不开返回 None，不报错**——最坏就是让人重登一次。
+- **加密挡不住门户进程自己**：它必须解得开才能发给上游。所以这个功能真正的
+  安全边界是「谁能登进这个门户账号，谁就能以你的身份用那些外部站点」。
+- **唯一索引用的是 `scope_hash`（域+路径+名字的 SHA-256），不是三列直接进索引**：
+  utf8mb4 下 255×3 个字符要 3060 字节，加上前两列就超过 InnoDB 那 3072 字节的上限。
+- **请求侧是「罐子优先，浏览器那份补漏」**（`_cookie_out`）。两份都要：罐子那份是
+  上游最近真发下来的，浏览器那份可能是陈货；但脚本用 `document.cookie` 自己种的
+  东西（语言、时区、分桶）从不经过 `Set-Cookie`，罐子里没有，丢掉页面会每次重问。
+- **浏览器一条 Cookie 都没带时那个分支根本不会走到**，而那恰恰是这个功能最该出场的
+  时候（第一次进、刚清过数据）。所以另有一段 `if target.jar and not seen_cookie`
+  把罐子那份补上去——HTTP 和 WebSocket 两条路都要，漏了 WS 的表现是
+  「页面打得开，实时那块一直连接中」。
+- **存罐子挂在 `resp` 刚到手那一句**，不是挂进 `_response_headers`：后者在
+  「改写后整份发」和「流式转」两条出路上各调一次，挂进去会存两遍。
+- **读 `Set-Cookie` 必须走 `resp.headers.raw`**：一次响应好几条是常事，字典形状只留
+  得下最后一条，表现成「明明登录成功了，下次进来还是没登录」——真正管用的那枚
+  正好不是最后一条。
+- **`Domain` 必须是请求主机的后缀，单标签的域（`Domain=com`）一律拒。** 没有公共
+  后缀表可查，这两条是仅有的防线：不拦的话代理底下任一上游都能给同族别的站种 Cookie。
+- **上游用「过期时间在过去」来删 Cookie，要翻译成一条 DELETE。** 不翻译的话退出登录
+  之后罐子里还留着旧会话，下次进来带着一枚作废的票，有些站点会卡在半登录状态。
+- **cryptography 没装时整个功能自己关掉**（`secretbox.available()`），门户照常跑。
+  明文落库比不做这个功能更糟，所以没有「先明文存着」这条退路。
+- 会话 Cookie（没有过期时间的）在罐子里放 90 天，从最后一次被上游更新算起。
+  跟着关页面清掉就失去意义了，但也不能永远留着。
+
 #### 一个站一个文件：[proxy_webside/](backend/app/proxy_webside/)
 
 通用那两道对谁都一样，但具体到某个站总有几条只属于它的事（资源在哪几个域名上、
@@ -455,6 +506,10 @@ exe 打成 **windowed（`console=False`）**：双击不弹 CMD 黑框，起来�
   协议实现要手写进 `hiddenimports`。
 - **`pymysql` 要显式列进 `hiddenimports`**：它按 conf.json 里的 charset 在运行时挑
   编解码器，静态分析看不见，漏了的表现是「exe 一连库就 `LookupError: unknown encoding`」。
+- **`cryptography` 是唯一一个带 C 扩展的依赖**（Cookie 代理用它做 AES-GCM）。
+  PyInstaller 自带 hook，不用手写 hiddenimports；**别往 `excludes` 里加它**，
+  排掉的表现是 exe 里 Cookie 代理静悄悄失效（`secretbox.available()` 返回 False），
+  不报错，只是每次进外部站点都要重登。
 - 脚本自己就叫 `pyinstaller.bat`，所以里面必须写 `python -m PyInstaller`——
   裸写 `pyinstaller` 会被 cmd 解析成这个脚本本身，死循环。
 - **发布目录只放 Portal.exe**：`conf.json` 不从本机拷，那里面是这台机器自己的口令和数据。

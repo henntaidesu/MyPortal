@@ -153,7 +153,10 @@ function normalizeItem(i) {
     proxy: proxyMode(i.proxy),
     // 整站模式下额外放行的域名（逗号隔开）。站点自己那几个域名后端有一份内置的
     // （app/proxy_webside/），这里填的是补充
-    proxyHosts: typeof i.proxyHosts === 'string' ? i.proxyHosts : ''
+    proxyHosts: typeof i.proxyHosts === 'string' ? i.proxyHosts : '',
+    // Cookie 代理：开了之后上游站点的登录态存在服务器上（app/cookiejar.py），
+    // 换设备、清缓存都不掉登录。只有 proxy 开着时才有意义
+    cookieJar: !!i.cookieJar
   }
 }
 
@@ -315,7 +318,8 @@ export function addItem(gid, payload) {
     desc: (payload.desc || '').trim(),
     icon: (payload.icon || '').trim(),
     proxy: proxyMode(payload.proxy),
-    proxyHosts: (payload.proxyHosts || '').trim()
+    proxyHosts: (payload.proxyHosts || '').trim(),
+    cookieJar: !!payload.cookieJar
   }))
 }
 
@@ -330,6 +334,7 @@ export function updateItem(gid, id, payload) {
   item.icon = (payload.icon || '').trim()
   item.proxy = proxyMode(payload.proxy)
   item.proxyHosts = (payload.proxyHosts || '').trim()
+  item.cookieJar = !!payload.cookieJar
 
   const to = payload.group && payload.group !== gid ? findGroup(payload.group) : null
   if (to) {

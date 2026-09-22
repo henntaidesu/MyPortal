@@ -33,7 +33,7 @@ import json
 import time
 from typing import Any, Optional
 
-from . import config, db
+from . import config, cookiejar, db
 
 MAX_GROUPS = 50
 MAX_ITEMS = 500               # 所有分类加起来
@@ -43,7 +43,7 @@ DEFAULT_TITLE = '我的门户'
 DEFAULT_GROUP = '我的导航'
 
 # 摊进表里的那几列。剩下的字段原样进 extra
-_ITEM_COLUMNS = ('id', 'name', 'url', 'desc', 'icon', 'proxy', 'proxyHosts')
+_ITEM_COLUMNS = ('id', 'name', 'url', 'desc', 'icon', 'proxy', 'proxyHosts', 'cookieJar')
 _GROUP_COLUMNS = ('id', 'name', 'items')
 
 # 进程内的改动计数，给 app/proxy.py 的目标表缓存当失效信号用。
@@ -119,6 +119,9 @@ def _row_to_item(row: dict) -> dict:
         # 落库时三挡存成 '' / 'true' / 'site'，这里还原成前端那三个值
         'proxy': 'site' if row['proxy'] == 'site' else (row['proxy'] == 'true'),
         'proxyHosts': item.get('proxyHosts', '') if isinstance(item.get('proxyHosts'), str) else '',
+        # 开了就把上游的登录态存在服务器上（app/cookiejar.py）。和 proxyHosts 一样
+        # 走 extra，不单开一列：它们都是「代理模式的附属参数」，不是独立的一等字段
+        'cookieJar': bool(item.get('cookieJar')),
     })
     return item
 
@@ -224,6 +227,9 @@ def save(user_id: int, data: dict) -> int:
     删光再插一遍，一个事务里做完。中途失败会整个回滚——半棵树比旧的那棵更糟。
     """
     groups = data.get('groups') or []
+    # 开着 Cookie 代理的卡片。存完之后除了这些，别的罐子一律收掉（见 cookiejar.retain）
+    with_jar = {str(i.get('id') or '') for g in groups
+                for i in (g.get('items') or []) if i.get('cookieJar')}
     with db.cursor(write=True) as cur:
         # 先落 prefs：`updated_at` 是 ON UPDATE CURRENT_TIMESTAMP，但值没变的
         # UPDATE 不会触发它，所以显式写一次时间，不然只动卡片时这个戳不走
@@ -254,6 +260,8 @@ def save(user_id: int, data: dict) -> int:
                 hosts = item.get('proxyHosts')
                 if isinstance(hosts, str) and hosts.strip():
                     extra['proxyHosts'] = hosts.strip()
+                if item.get('cookieJar'):
+                    extra['cookieJar'] = True
                 rows.append((
                     user_id, group_id, str(item.get('id') or '')[:64] or f'g{gi}i{ii}',
                     str(item.get('name') or '')[:200], str(item.get('url') or ''),
@@ -265,6 +273,9 @@ def save(user_id: int, data: dict) -> int:
                     'INSERT INTO nav_items (user_id, group_id, client_id, name, url, '
                     'descr, icon, proxy, `position`, extra) '
                     'VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)', rows)
+
+        # 同一个事务里收掉「卡片删了」和「开关关了」留下的登录数据
+        cookiejar.retain(cur, user_id, with_jar)
 
     _revision[user_id] = _revision.get(user_id, 0) + 1
     return int(time.time())

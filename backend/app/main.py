@@ -18,12 +18,13 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import db, iconcache, navstore, oidc, proxy, users
+from . import cookiejar, db, iconcache, navstore, oidc, proxy, users
 from .config import CONF_PATH, DIST_DIR, HOST, PORT, uses_default_password
 from .icon import router as icon_router
 from .proxy import router as proxy_router
 from .routers.account import router as account_router
 from .routers.auth import router as auth_router
+from .routers.cookies import router as cookies_router
 from .routers.nav import router as nav_router
 from .routers.users import router as users_router
 
@@ -34,6 +35,12 @@ async def _purge_loop() -> None:
     while True:
         await asyncio.sleep(PURGE_INTERVAL)
         await asyncio.to_thread(iconcache.purge)   # 过期的图标缓存清一清
+        # 过期的、以及太久没动过的上游 Cookie。放在同一趟里，不另起一个任务：
+        # 两件事都是「每小时扫一遍、慢一点也无所谓」
+        try:
+            await asyncio.to_thread(cookiejar.purge)
+        except Exception as exc:                   # noqa: BLE001
+            print(f'[Cookie 代理] 清理过期数据失败，下一轮再试: {exc}')
 
 
 @contextlib.asynccontextmanager
@@ -54,6 +61,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     print(f'[portal] 单点登录 {oidc.describe()}')
     print(f'[portal] 图标缓存 {iconcache.describe()}')
     print(f'[portal] 门户代理 {proxy.describe()}')
+    print(f'[portal] Cookie 代理 {cookiejar.describe()}')
 
     if users.count() == 0:
         # 一个用户都没有 = 谁都登不进来。不停下来是故意的：停了就连改配置的机会都没有
@@ -83,6 +91,7 @@ app.add_middleware(proxy.Fallback)
 
 app.include_router(auth_router)
 app.include_router(account_router)
+app.include_router(cookies_router)
 app.include_router(users_router)
 app.include_router(icon_router)
 app.include_router(nav_router)

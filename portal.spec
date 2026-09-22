@@ -52,10 +52,11 @@ hiddenimports = [
     # 构建机器上，而不是跑 exe 的那台。
     'app', 'app.main', 'app.config', 'app.auth', 'app.navstore',
     'app.db', 'app.users', 'app.oidc',       # MySQL 数据层、用户表、单点登录
+    'app.cookiejar', 'app.secretbox',        # Cookie 代理：上游登录态加密存库
     'app.icon', 'app.iconcache', 'app.proxy',
     'app.proxyrewrite', 'app.proxyhook',     # 整站代理的正文改写和注入脚本
     'app.routers', 'app.routers.auth', 'app.routers.nav',
-    'app.routers.users', 'app.routers.account',
+    'app.routers.users', 'app.routers.account', 'app.routers.cookies',
     'app.logwindow', 'app.tray',     # 桌面外壳，见下面那段
 
     # PyMySQL 按 conf.json 里的 charset 在运行时挑编解码器，静态分析看不见。
