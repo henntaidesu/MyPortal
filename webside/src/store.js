@@ -1,10 +1,11 @@
 import { reactive, watch } from 'vue'
 import { api } from './api'
+import { auth } from './auth'
 import { uid, normalizeUrl, takeOverKey } from './utils'
 
 /**
- * 导航数据存在后端的 conf.json 里（`nav` 那一段，见 app/navstore.py），
- * 换台机器、换个浏览器登进来都是同一份。只有一个账号，所以没有「谁的导航」这回事。
+ * 导航数据存在后端的 MySQL 里（见 app/navstore.py），**每个账号一份**，
+ * 换台机器、换个浏览器登进来都是自己那份。
  *
  * 结构是「分类 → 卡片」两层，页面上一个分类画成一张大卡：
  *
@@ -19,14 +20,33 @@ import { uid, normalizeUrl, takeOverKey } from './utils'
  * 和后端打交道的只有 pull() / push() 两个函数，其余代码不关心数据从哪儿来——
  * 这是这个文件刻意保持的边界。冲突策略是后写的盖先写的，两个浏览器同时改，后按下的那边赢。
  */
-const KEY = 'portal-nav'               // 本机缓存
-const DIRTY_KEY = KEY + ':dirty'       // 有这个键 = 本机的改动还没推上去
+/**
+ * 本机缓存的键**按账号分**：`portal-nav:u<用户 id>`。
+ *
+ * 多用户之前这里是一个固定的 `portal-nav`。继续用固定键的话，同一台电脑上
+ * 换个账号登进来，先画出来的是**上一个人的导航**——而且页面一起来就把它当成
+ * 「本机这份」推给后端，等于拿 A 的导航盖掉 B 的。
+ *
+ * 没登录时退回那个不带 id 的老键：登录页上用不着缓存，但 `readLocal` 在
+ * 登录之前也可能被叫到，给个确定的值比返回 undefined 省事。
+ */
+const BASE_KEY = 'portal-nav'
 const THEME_KEY = 'portal-nav-theme'   // 主题单独存一份，首屏脚本要在 Vue 起来之前读它
 
-/* 早先按用户分区的老键（portal-nav:u<id>）认不出是谁的，不迁移；
-   更早那两个匿名键倒是能直接认领 */
+function navKey() {
+  const id = auth.user?.id
+  return id ? `${BASE_KEY}:u${id}` : BASE_KEY
+}
+
+function dirtyKey() {
+  return navKey() + ':dirty'           // 有这个键 = 本机的改动还没推上去
+}
+
+/* 更早那两个匿名键直接认领。单账号那一版留下的 `portal-nav` 不在这儿迁——
+   那会儿它属于谁说不清，认领给第一个登进来的人是错的。它会在第一次
+   `boot()` 里按「当前这个人还没有自己的缓存」认领一次，见下面 readLocal */
 takeOverKey('home-nav-theme', THEME_KEY)   // 主题要在下面 normalize 读它之前先接过来
-takeOverKey('home-nav', KEY)
+takeOverKey('home-nav', BASE_KEY)
 
 const LOCAL_DELAY = 200                // 本机缓存写得勤一点，反正不花钱
 const PUSH_DELAY = 800                 // 推后端的攒一下，别拖一下卡片发十几个请求
@@ -46,8 +66,17 @@ export const sync = reactive({
 
 function readLocal() {
   try {
-    const raw = localStorage.getItem(KEY)
+    const raw = localStorage.getItem(navKey())
     if (raw) return JSON.parse(raw)
+    /* 这个账号还没有自己的缓存。单账号那一版留下的 `portal-nav` 里可能正躺着
+       这个人自己的导航（他就是当年那个唯一的账号），认领过来一次。
+       认领**只发生一次**：认完就搬到带 id 的键下，老键删掉，
+       第二个人登进来时那儿已经什么都没有了 */
+    if (auth.user?.id) {
+      takeOverKey(BASE_KEY, navKey())
+      const moved = localStorage.getItem(navKey())
+      if (moved) return JSON.parse(moved)
+    }
   } catch (e) {
     console.warn('本机缓存读不出来，忽略', e)
   }
@@ -56,7 +85,7 @@ function readLocal() {
 
 function writeLocal() {
   try {
-    localStorage.setItem(KEY, JSON.stringify(state))
+    localStorage.setItem(navKey(), JSON.stringify(state))
   } catch (e) {
     console.error('写本机缓存失败', e)
   }
@@ -64,12 +93,12 @@ function writeLocal() {
 
 function markDirty() {
   try {
-    localStorage.setItem(DIRTY_KEY, '1')
+    localStorage.setItem(dirtyKey(), '1')
   } catch { /* 存不下也就算了，大不了这次改动只活在内存里 */ }
 }
 
 function isDirty() {
-  return localStorage.getItem(DIRTY_KEY) !== null
+  return localStorage.getItem(dirtyKey()) !== null
 }
 
 /** 推给后端。成功才清掉脏标记——没清掉的话下次进页面会先推再拉 */
@@ -80,7 +109,7 @@ async function push() {
       method: 'PUT',
       body: { data: { title: state.title, theme: state.theme, groups: state.groups } }
     })
-    localStorage.removeItem(DIRTY_KEY)
+    localStorage.removeItem(dirtyKey())
     sync.offline = false
   } catch (e) {
     sync.offline = true
@@ -228,8 +257,9 @@ async function reconcile(cached) {
 }
 
 /** 会话没了：停掉自动保存并清空内存里这份，别让登录页背后还留着一屏卡片。
-    本机缓存留着不动——只有一个账号，下次登录还是同一个人，留着能少等一次接口。
-    没落盘的改动也不会丢：脏标记还在 localStorage 里，下次登录会先推后拉 */
+    本机缓存留着不动——它带着用户 id，下次这个人自己登回来还能少等一次接口，
+    换个人登进来也看不到它。没落盘的改动也不会丢：脏标记还在 localStorage 里，
+    下次这个人登录会先推后拉 */
 export function unbind() {
   stopWatch?.()
   stopWatch = null

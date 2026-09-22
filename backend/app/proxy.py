@@ -8,8 +8,9 @@
     浏览器 ──同源──> 门户(9921) ──> 192.168.1.10:8080 / jp.mercari.com
 
 **要登录**，而且这是仓库里最该要登录的一个接口：它把门户的网络可达性借给了调用方。
-目标地址不是调用方给的，是拿卡片 id 去 nav 里查出来的；整站模式下地址里虽然带了
-主机名，但那个主机必须落在这张卡片的白名单内（见 app/proxyrewrite.py 的 `allow_for`）。
+目标地址不是调用方给的，是拿卡片 id 去**当前登录这个人自己的**卡片里查出来的
+（`navstore.cards(user_id)`）；整站模式下地址里虽然带了主机名，但那个主机必须落在
+这张卡片的白名单内（见 app/proxyrewrite.py 的 `allow_for`）。
 **这条白名单是唯一的安全边界，别去掉**——不拦的话这个代理对登录者就是
 「想连哪台连哪台」的开放中继，而门户多半正站在内网里。
 
@@ -36,7 +37,10 @@
 ## 这里不做
 
 - **不缓存**：转发的是人家系统的动态页面，缓存策略原样带回去，由浏览器认。
-- **不做多用户隔离**：只有一个账号，登进来的人本来就能看全部卡片。
+- **不做「谁能访问哪台机器」这种细粒度授权**：卡片是谁的，谁就能通过它转发，
+  仅此而已。归属校验在 `_target()` 那一句里——查的是这个人自己的目标表，
+  不是先查全局表再比对 user_id（比对写法漏一次，就是拿到别人的卡片 id
+  就能借门户往那台机器上打）。
 - **不改请求体**：GET 的查询串里那种「返回地址」会还原成上游的真实地址，
   POST 表单里同样的东西不管——那得把请求体整个读进内存，而这条路也要走大文件上传。
 
@@ -52,6 +56,7 @@ import asyncio
 import contextlib
 import inspect
 import re
+import time
 from typing import Any, NamedTuple, Optional
 from urllib.parse import quote, unquote, urlsplit
 
@@ -60,8 +65,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, WebSoc
 from fastapi.responses import RedirectResponse, StreamingResponse
 from starlette.background import BackgroundTask
 
-from . import config, navstore, proxy_webside as webside, proxyrewrite
-from .auth import COOKIE_NAME, client_ip, require_login, valid_token
+from . import navstore, proxy_webside as webside, proxyrewrite
+from .auth import COOKIE_NAME, client_ip, require_login, user_from_token
 from .config import COOKIE_SECURE
 from .proxyrewrite import MARK, Rewriter
 
@@ -147,42 +152,38 @@ class Target(NamedTuple):
         return f'{PREFIX}/{self.item_id}/{MARK}/'
 
 
-_cache_key: object = None
-_cache: dict[str, Target] = {}
+# 每个用户一张目标表。多用户之后卡片 id 不再是全局唯一的，两个人各自的卡片
+# 完全可能撞上同一个 id（前端那个 uid() 是本机随机生成的）——按 id 直接查全局表
+# 的话，撞上就是「点我的卡片打开了别人那台机器」。
+_CACHE_TTL = 5.0
+_cache: dict[int, tuple[float, int, dict[str, Target]]] = {}
 
 
-def _targets() -> dict[str, Target]:
-    """卡片 id → 目标，只收「门户代理」打开了的那些。
+def _targets(user_id: int) -> dict[str, Target]:
+    """(这个人的) 卡片 id → 目标，只收「门户代理」打开了的那些。
 
-    读的是磁盘上那份 nav（conf.json 随时可能被手改，内存里那份是启动时的快照）。
-    但打开一个页面能连着打出几十个子资源请求，每个都重读一遍 conf.json 太费——
-    文件没动过（mtime + 大小都没变）就用上次算好的那份。
+    打开一个被代理的页面能连着打出几十个子资源请求，每个都重查一遍库太费，
+    所以压一层缓存。失效有两道：
+
+      - `navstore.revision()` 是进程内的改动计数，**同一个进程里存完导航，
+        下一个请求就看得到新的**；
+      - 5 秒 TTL 兜住「别的进程改了库」这种情况（多实例部署）。
+
+    两道都要：只靠 TTL 的话，自己刚改完卡片地址、点进去还是老的，查起来很懵。
     """
-    global _cache_key, _cache
-    try:
-        st = config.CONF_PATH.stat()
-        key = (st.st_mtime_ns, st.st_size)
-    except OSError:
-        key = None
-    if key is not None and key == _cache_key:
-        return _cache
-
-    data, _ = navstore.load()
-    groups = (data or {}).get('groups')
-    if not isinstance(groups, list):
-        # 老的扁平结构：整份就是一个 items 列表，没有分类这一层
-        groups = [data] if isinstance((data or {}).get('items'), list) else []
+    now = time.monotonic()
+    rev = navstore.revision(user_id)
+    hit = _cache.get(user_id)
+    if hit and hit[0] > now and hit[1] == rev:
+        return hit[2]
 
     table: dict[str, Target] = {}
-    for group in groups:
-        if not isinstance(group, dict):
-            continue
-        for item in group.get('items') or []:
-            target = _to_target(item)
-            if target:
-                table[target.item_id] = target
+    for item in navstore.cards(user_id):
+        target = _to_target(item)
+        if target:
+            table[target.item_id] = target
 
-    _cache, _cache_key = table, key
+    _cache[user_id] = (now + _CACHE_TTL, rev, table)
     return table
 
 
@@ -207,11 +208,16 @@ def _to_target(item: object) -> Optional[Target]:
                   f'{parts.scheme}://{parts.netloc}', site, allow, module)
 
 
-def _target(item_id: str) -> Target:
-    target = _targets().get(item_id)
+def _target(user_id: int, item_id: str) -> Target:
+    """**归属校验就是这一句**：查的是「这个人的」那张表，不是全局表。
+
+    写成「查出来再比一比 user_id」的话，哪天多一条取卡片的路就漏一次，
+    而漏一次的后果是：拿到别人的卡片 id 就能借门户往那台机器上打。
+    """
+    target = _targets(user_id).get(item_id)
     if not target:
-        # 不说「这张卡片存在但没开代理」还是「压根没这张卡片」：没必要，
-        # 也省得把别人的导航里有什么透出去
+        # 不区分「这张卡片不是你的」「存在但没开代理」「压根没这张卡片」：
+        # 分开说等于让人拿一串 id 去探别人的导航里有什么
         raise HTTPException(404, '这张卡片没有开门户代理')
     return target
 
@@ -535,16 +541,15 @@ async def shutdown() -> None:
         _http = None
 
 
-@router.api_route('/{item_id}', methods=['GET', 'HEAD'],
-                  dependencies=[Depends(require_login)])
-def enter(item_id: str):
+@router.api_route('/{item_id}', methods=['GET', 'HEAD'])
+def enter(item_id: str, user: dict = Depends(require_login)):
     """卡片的链接落在这里，再跳到带路径的那条。
 
     前端只拼 /api/proxy/<id>，路径和查询串在这儿从卡片地址里补上——两头都去解析
     一遍 URL 没必要，而且卡片地址改了之后前端那份不会还记着老路径。
     307 不是 302：万一是带着方法过来的，方法别被改成 GET。
     """
-    target = _target(item_id)
+    target = _target(int(user['id']), item_id)
     parts = urlsplit(target.url)
     tail = parts.path.lstrip('/')
     if parts.query:
@@ -553,10 +558,10 @@ def enter(item_id: str):
     return RedirectResponse(head + tail, status_code=307)
 
 
-@router.api_route('/{item_id}/{path:path}', methods=_METHODS,
-                  dependencies=[Depends(require_login)])
-async def forward(item_id: str, path: str, request: Request):
-    target = _target(item_id)
+@router.api_route('/{item_id}/{path:path}', methods=_METHODS)
+async def forward(item_id: str, path: str, request: Request,
+                  user: dict = Depends(require_login)):
+    target = _target(int(user['id']), item_id)
     scheme, host, rest = _upstream(target, request.scope)
     rewriter = _rewriter(target) if target.site else None
 
@@ -703,12 +708,14 @@ async def forward_ws(ws: WebSocket, item_id: str, path: str):
     HTTP 那套异常处理接着，结果是一个 500 而不是干净的拒绝。自己查一遍 Cookie，
     不对就按 1008（policy violation）关掉。
     """
-    if not valid_token(ws.cookies.get(COOKIE_NAME, '')):
+    user = user_from_token(ws.cookies.get(COOKIE_NAME, ''))
+    if user is None:
         await ws.close(code=1008)
         return
 
     ws_mod = _ws_module()
-    target = _targets().get(item_id)
+    # 和 HTTP 那条一样，查的是这个人自己的目标表
+    target = _targets(int(user['id'])).get(item_id)
     if ws_mod is None or target is None:
         await ws.close(code=1011)
         return
@@ -868,8 +875,8 @@ class Fallback:
 
 
 def describe() -> str:
-    """给启动日志用的一句话。"""
-    targets = _targets().values()
+    """给启动日志用的一句话。数的是全库所有人的卡片，不走那层按用户的缓存。"""
+    targets = [t for t in (_to_target(item) for item in navstore.proxy_cards()) if t]
     if not targets:
         return '没有卡片开着（卡片编辑框里「门户代理」那一栏选「开启」）'
     sites = [t for t in targets if t.site]

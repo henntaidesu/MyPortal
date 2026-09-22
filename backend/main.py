@@ -1,8 +1,11 @@
 #!/usr/bin/env python
 """打包入口：PyInstaller 从这里进来，开发时用不着它（开发时是 `python -m app.main`）。
 
-exe 没有子命令：门户的配置和数据全在一个 conf.json 里，要改直接用记事本，
-不需要一套命令行来伺候。双击 Portal.exe 就是起服务。
+exe 没有子命令：配置在 exe 同级那个 conf.json 里（用记事本改），数据在 MySQL 里
+（用页面改），两头都不需要一套命令行来伺候。双击 Portal.exe 就是起服务。
+
+**连不上数据库时会当场 SystemExit**，那句提示要落进下面说的运行窗口里——
+这正是 `_hold_on_failure` 存在的理由，而且这一版比上一版更容易撞上它。
 
 ## 为什么打成 windowed
 

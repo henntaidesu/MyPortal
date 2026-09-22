@@ -6,8 +6,10 @@ rem ============================================================
 rem  9920  portal frontend (vite)
 rem  9921  python backend (FastAPI); the frontend proxies /api to it
 rem
-rem  No database. One file holds everything: backend\conf.json - listen
-rem  host/port, the login user/password, and the nav cards themselves.
+rem  Needs a reachable MySQL. Users and nav data live there; backend\conf.json
+rem  only holds the connection string, the listen host/port and the OIDC settings.
+rem  Fill in the "database" section of backend\conf.json before the first run,
+rem  otherwise the backend exits on startup.
 rem
 rem  ASCII ONLY in this file. cmd.exe parses .bat with the system ANSI codepage
 rem  (936 here), so UTF-8 Chinese gets mis-paired byte by byte and part of a
@@ -79,7 +81,8 @@ if errorlevel 1 (
 rem ---------- start the backend ----------
 rem  /B keeps it inside THIS console instead of opening a second window:
 rem  both servers log here, and closing this window stops both of them.
-rem  conf.json is created on first run - nothing to set up beforehand.
+rem  conf.json is created on first run; its "database" section must point at a
+rem  reachable MySQL or the backend exits right away (see the log above).
 echo.
 echo   Starting backend on port 9921...
 start "" /D "%~dp0backend" /B %PY% -m app.main
@@ -91,6 +94,8 @@ if not defined BACKPID (
     echo.
     echo   [WARN] Backend is not listening on 9921.
     echo          The nav page will open but it cannot save.
+    echo          Most likely cause: the "database" section of
+    echo          backend\conf.json does not point at a reachable MySQL.
     echo          Run it by hand to see the error:
     echo              cd backend ^&^& %PY% -m app.main
     echo.
@@ -101,8 +106,9 @@ rem ---------- start the frontend ----------
 echo.
 echo   Portal:    http://localhost:9920
 echo   LAN:       see the Network address printed below
-echo   Login:     admin / admin on first run - see backend\conf.json
-echo   All data:  backend\conf.json
+echo   Login:     admin / admin on first run - see auth.bootstrap_admin
+echo              in backend\conf.json; change it from the page afterwards
+echo   Data:      MySQL (see the database section of backend\conf.json)
 echo   Both servers log into this window - close it to stop both.
 echo.
 

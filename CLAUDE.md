@@ -6,14 +6,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 这是什么
 
-一个简单的导航页：前端是导航卡片页（Vue 3 + Vite，9920），后端是一个 Python 进程
-（FastAPI，9921），负责托管页面、一个账号的登录、读写导航数据、代抓站点图标、
-把开了「门户代理」那些卡片的请求替浏览器转出去（内网机器，或者只有门户这台够得着的站点）。
+一个多用户导航页：前端是导航卡片页（Vue 3 + Vite，9920），后端是一个 Python 进程
+（FastAPI，9921），负责托管页面、登录（本地账号 + OIDC 单点登录）、按人读写导航数据、
+代抓站点图标、把开了「门户代理」那些卡片的请求替浏览器转出去（内网机器，
+或者只有门户这台够得着的站点）。
 
-**没有数据库。配置和数据在同一个文件里：`backend/conf.json`。**
-（仓库早先有过一套 MySQL + 单点登录 + 多用户的认证中心，已整体移除，别再往回加。）
+**数据在 MySQL 里，配置在 `backend/conf.json` 里，两者不混。**
+库里五张表：`users`（账号和口令哈希）、`user_identities`（OIDC 绑定）、
+`nav_prefs` / `nav_groups` / `nav_items`（每人一份的导航），外加一张
+`portal_meta` 放签名密钥和迁移标记。conf.json 只剩连接串、监听地址、OIDC 参数。
+
+**每个人看到的是自己那份导航**，互相看不见，卡片 id 也不是全局的
+（两个人撞同一个 id 是允许的）。
 
 ## 常用命令
+
+**先得有一个连得上的 MySQL**（5.7+ / 8.x，或 MariaDB 10.2+），库和表由程序自己建，
+但账号得有 `CREATE DATABASE` 和建表的权限。连不上就 `SystemExit`，服务根本起不来——
+这一版没有「退回单机模式」的余地。
 
 ```bash
 # 一键启动（Windows，装依赖 + 起前后端 + 开浏览器）
@@ -21,7 +31,7 @@ start.bat
 
 # 后端：必须在 backend/ 目录下执行，代码用的是相对包 app
 cd backend
-pip install -r requirements.txt   # fastapi + uvicorn + httpx，就这三个
+pip install -r requirements.txt   # fastapi + uvicorn + httpx + PyMySQL，就这四个
 python -m app.main                # http://localhost:9921
 
 # 前端：必须在 webside/ 目录下执行
@@ -34,10 +44,17 @@ npm run build                     # 产物 webside/dist，后端会自动托管
 pyinstaller.bat                   # 产物 Releases\<版本>\Portal.exe
 ```
 
-没有任何命令行管理工具，也不需要：要改口令或导航，直接编辑 `conf.json`。
+没有命令行管理工具。**改口令、加用户、改导航都在页面上做**（右上角那个菜单）：
+口令是哈希存的，改 conf.json 已经改不动它了。唯一还要编辑 conf.json 的是数据库连接、
+监听地址和 OIDC 参数，改完要重启。
+
+第一个管理员由 `auth.bootstrap_admin` 建，**只在 users 表为空时看这一段**——
+已经有人了就完全不管它，所以配置里留着那对用户名口令既不会重复建号，
+也不会把人家在页面上改过的口令改回去。
 
 **本仓库没有测试、没有 linter、没有 CI**。改动靠手动跑起来验证：`start.bat` 起前后端，
-登录 → 加一张卡片 → 刷新看还在不在 → 确认 `backend/conf.json` 的 `nav` 段变了。
+登录 → 加一张卡片 → 刷新看还在不在 → 到库里 `SELECT * FROM nav_items` 看一眼。
+多用户那部分再多验一步：**另开一个隐身窗口用第二个账号登进去，确认看到的是空的**。
 
 > 起服务前先确认 9921 没被上一次的进程占着。占着的话新进程会静静退出，
 > 请求全被**老代码**应答，表现成「改的东西怎么不生效」。
@@ -54,60 +71,116 @@ pyinstaller.bat                   # 产物 Releases\<版本>\Portal.exe
 `StaticFiles` 在 [backend/app/main.py](backend/app/main.py) 里**挂在最后**，接口路由先匹配，
 剩下的才交给静态站点。新增路由要在 `app.mount('/')` 之前 include。
 
-### conf.json 一个文件装下配置和数据
+### conf.json 只剩配置，数据在 MySQL
 
 ```json
-{"server": {...}, "auth": {...}, "nav": {"title": ..., "theme": ..., "groups": [...]}}
+{"server": {...}, "database": {...}, "auth": {...}, "oidc": {...}}
 ```
 
-文件归 [config.py](backend/app/config.py) 管，导航那一段的语义在
-[navstore.py](backend/app/navstore.py)，它不直接碰磁盘，走 `config.read_section('nav')`
-/ `config.replace_section('nav', ...)`。
+文件归 [config.py](backend/app/config.py) 管，**整份只在启动时读一次**，改完要重启。
+这一版没有「跑着的时候改 conf.json」这回事了：会变的东西（口令、用户、导航）都在库里。
 
-- **写是「重读整份文件 → 只换一个顶层键 → 整份原子写回」**（`.tmp` + `os.replace`）。
-  重读那一步不能省：服务跑着的时候有人手改了 `auth.password`，存一次导航不该把它抹掉。
-- **`server` 和 `auth` 只在启动时读一次**（模块级常量），改完要重启。`nav` 每次现读磁盘——
-  拿启动时的快照当数据源的话，改完刷新页面会看到旧的。
-- **conf.json 读不出来时直接 `SystemExit`，绝不重新生成一份。** 这个文件里装着人家
-  全部的导航数据，坏了就停下来让人自己看，覆盖一次等于把数据删了。
-  （`nav` 那一段单独坏掉是另一回事，那只当「还没配过」，页面照常打得开。）
-- **生成出来的 `nav` 是 `null`，不是一份空导航。** 前端靠「nav 为 null」判断这是台还没
-  配过的机器，会把本机缓存那份推上来。给成 `{"groups": []}` 的话，老用户第一次打开会
-  看到一片空，而且缓存再也推不上去。
-- **老版本的 `conf.ini` / `nav.json` 首次启动自动折进来**（`_migrate`），读完**不删**——
-  删用户的数据不该由程序替人决定。configparser 读出来一律是字符串，所以迁移时按模板
-  里的类型转回去（`_coerce`），不然生成的文件里会是 `"port": "9921"`。
+- **conf.json 读不出来时直接 `SystemExit`，绝不重新生成一份。** 里面装着数据库口令和
+  OIDC 的 client_secret，覆盖一次就得全部重配。
+- **`auth.bootstrap_admin` 只在 users 表为空时看**，见上面那节。
+  原地升级上来的 conf.json 里只有单账号时代那对 `auth.username` / `auth.password`，
+  **config.py 里那条退回去认它们的分支不能删**——不认的话库里一个用户都建不出来，
+  表现成「升完级谁都登不进去」，而人手里那份 conf.json 看着完全正常。
+- **老版本的 `conf.ini` / `nav.json` 首次启动仍然自动折进来**（`_migrate`），
+  `nav` 那一段接着会被搬进数据库（[navstore.py](backend/app/navstore.py) 的
+  `import_legacy`，搬进第一个管理员名下，搬没搬过记在 `portal_meta` 里）。
+  **读完都不删**——删用户的数据不该由程序替人决定。
+- **两条登录路都关了（`allow_local_login` false 且 `oidc.enabled` false）就直接停下来**：
+  那等于谁都进不来，而登录页上一个按钮都不会有，只会是一片空白。
 
-### 登录：一个账号，签名 Cookie，服务端不存会话
+### 数据库：五张表，PyMySQL 直连，自己写 SQL
 
-口令明文写在 `conf.json` 的 `auth` 段，校验和会话都在 [auth.py](backend/app/auth.py)。
+表结构在 [db.py](backend/app/db.py) 的 `_DDL` 里，全是 `CREATE TABLE IF NOT EXISTS`，
+每次启动跑一遍。库不存在会先 `CREATE DATABASE`，所以部署时不用手工建库。
 
-- **会话是一枚 `<过期时间戳>.<HMAC 签名>` 的 Cookie，服务端什么都不存。**
-  没有会话表、没有内存字典，所以重启不掉线，也不存在「会话攒一堆要清」。
-- **签名密钥是从口令 scrypt 出来的，不是配置项。** 这样改口令即刻让所有已发出的
-  Cookie 失效——不然改完口令，拿着旧 Cookie 的人还能接着用，改口令就白改了。
-  用 scrypt 而不是 sha256：口令熵低，密钥若能快速枚举，谁拿到一枚 Cookie 就能离线
-  爆破出口令，而服务端那道限流管不着离线爆破。`n=16384, r=8` 要 16 MB，
+- **不用 SQLAlchemy。** 表就五张，查询都是「按 user_id 取一棵两层树」，ORM 省不下什么；
+  而 **PyInstaller 靠静态分析决定打包什么**，SQLAlchemy 的方言和池实现全是按字符串
+  动态导入的，漏一个的表现是「源码跑得好好的，exe 一连库就 ModuleNotFoundError」。
+  PyMySQL 是纯 Python 单包，import 全是静态的。
+- **连接池是 `LifoQueue`，取出来先 `ping(reconnect=True)`。** FastAPI 的同步路由跑在
+  anyio 的线程池里（默认 40 条线程），一条全局连接会被两个请求同时用，把协议帧串掉，
+  表现成莫名其妙的 `Packet sequence number wrong`。ping 那一下是为了 `wait_timeout`——
+  门户半夜没人用，早上第一个请求撞上「MySQL server has gone away」几乎是必然的。
+- **`cursor()` 默认只读，走完 rollback。** InnoDB 在第一条 SELECT 时就开了事务，
+  不关的话这条连接一直挂着当时那个快照，被它服务的请求读到的数据会越来越旧。
+- **字符集必须 utf8mb4。** 三字节的 utf8 存不下 emoji，而卡片名字里很容易出现一个，
+  表现成插入时 `Incorrect string value`。
+- **`desc` 是 MySQL 保留字**，卡片描述那一列叫 `descr`。
+- **签名密钥在 `portal_meta` 里，不是配置项。** 让人往 conf.json 里填一串随机数多半
+  会被填成 `secret`；而多实例部署时两边填得不一样，表现成「刷新一下就掉线」。
+
+### 登录：多用户，本地口令 + OIDC，签名 Cookie，服务端不存会话
+
+口令哈希在 `users` 表里（[users.py](backend/app/users.py)），会话在
+[auth.py](backend/app/auth.py)，单点登录在 [oidc.py](backend/app/oidc.py)。
+
+- **会话仍然是一枚 Cookie，服务端什么都不存**，形状是
+  `<用户 id>.<token_version>.<过期时间戳>.<HMAC 签名>`。没有会话表、没有内存字典，
+  所以重启不掉线。
+- **`token_version` 替掉了上一版「密钥从口令 scrypt 出来」那个把戏。** 上一版只有一个
+  账号，改口令换密钥就能让所有 Cookie 失效；多用户之后一把密钥对不上 N 个口令，
+  所以改口令 / 停用 / 踢下线时给**那个人**的 `token_version` +1，只作废他一个人的票。
+  **改口令必须 +1**：不 +1 的话口令泄露后改口令就白做了，对方手里那枚 Cookie 还能用到过期。
+- **口令是 scrypt，每人一把随机盐，参数写在串里**（`scrypt$n$r$p$盐$结果`）。
+  参数写死在代码里的话，调大 n 那天所有人都得重置口令。`n=16384, r=8` 要 16 MB，
   在 `hashlib.scrypt` 默认 32 MB 上限内，调大之前先确认这一点。
-- **`check_credentials` 不短路**：写成 `a and b` 的话用户名错时根本不比口令，
-  两条路耗时不同，能被拿来探用户名。登录失败也不区分原因。
-- **登录限流是进程内内存**（`_fails` dict）。多 worker 起 uvicorn 会让它失效，
-  目前设计就是单进程。
+- **`check_password` 不短路，用户不存在时也照算一遍 scrypt**：不算的话「这个用户名
+  存不存在」「这个人有没有本地口令」都能从响应时间上看出来。登录失败也不区分原因。
+- **纯 OIDC 用户的 `password_hash` 是 NULL，不是空串。** 空串会走进「比一比口令」
+  那条路；NULL 直接返回 False，本地登录这条路对他是关着的。
+- **`require_login` 返回的是用户那一行，按用户取数据的地方一律从它拿 `user_id`**，
+  别从请求体里读——读请求体等于让调用方自己说他是谁。管理员接口挂 `require_admin`，
+  挂在**路由上**不是函数体里，以后新增一条路也漏不掉。
+- **`auth` 里那层 10 秒的用户缓存是权限撤销的生效上限，别调长。** 它是为了让打开一个
+  被代理的页面（一口气几十个子资源请求）不至于把连接池占满。同进程里改完会被
+  `forget()` 当场清掉，所以只有多实例部署才看得到这个延迟。
+- **`/api/me` 故意不要求登录**（没登录返回 200 + `user: null`）：页面一起来就要问一次，
+  回 401 会触发前端那条「会话过期」的通路，把「本来就还没登录」报成掉线。
+  `/api/auth/providers` 同理——正是没登录的人才需要它。
 - **`COOKIE_SECURE` 反向陷阱**：https 部署必须开，但 http 环境下开了浏览器会**直接丢掉**
   登录 Cookie，表现为登录后立刻又变成未登录。
-- **`require_login` 是仓库里唯一一处权限校验**，`/api/nav`、`/api/icon`、`/api/proxy`
-  都挂在 `dependencies` 上（`/api/proxy` 的 WebSocket 那条是自己查 Cookie，见下面那节）。
-  `/api/me` 故意**不**要求登录（没登录返回 200 + `user: null`）：
-  页面一起来就要问一次，回 401 会触发前端那条「会话过期」的通路，把「本来就还没登录」
-  报成掉线。
-- **`/api/icon` 要求登录**，因为它会替调用方发请求。但登录之后**不拦内网地址**——
-  拦了就取不回 `192.168.x.x` 那些系统的 favicon，而门户存在的意义正是指向那些地址。
+- **登录限流是进程内内存**（`_fails` dict）。多 worker 起 uvicorn 会让它失效，
+  目前设计就是单进程。
 
-### 导航数据：分类 → 卡片两层，后端权威，localStorage 只是缓存
+#### OIDC 这一路
+
+- **不引 authlib / python-jose**：只用得上授权码流程这一条路，而那两个包带进来的是
+  一整套 JOSE 实现和 `cryptography` 这个二进制扩展。门户的依赖全是纯 Python，
+  加一个带 C 扩展、还按字符串名字动态选算法后端的包，换来的是只在打包后才出现的问题。
+- **id_token 的签名不验，靠 TLS。** OIDC Core 3.1.3.7 第 6 条写明了：token 是客户端
+  带着 client_secret 直接从 token 端点、经 TLS 取回来的时候可以不验签——中间没有
+  第三方经手。**但 `iss` / `aud` / `exp` / `nonce` 四项一条都不能少**，它们防的是别的东西
+  （指到假 IdP、拿别的客户端的 token 来换会话、重放）。
+- **认人只认 `sub`，不认 email 也不认用户名。** 那两个在 IdP 里都能改，跟着它们走会让
+  改过名的人下次登录变成另一个账号，导航跟着丢。用户名只在**第一次**建号时用一下。
+- **state / nonce / PKCE 存在一枚签名过的临时 Cookie 里**（`portal_oidc`，10 分钟），
+  服务端什么都不存。它的 `SameSite` **必须是 lax 不能是 strict**：从 IdP 跳回来那一下
+  是跨站发起的顶层导航，strict 会让浏览器不带这枚 Cookie，表现成「每次回来都说状态丢了」。
+- **`next` 参数只认站内的根绝对路径**（`_safe_next`）。不拦的话这就是一个开放重定向，
+  而地址栏上一跳还是门户，看着很可信。`//坏站` 也要挡——那是协议相对地址。
+- **出错时是 303 回 `/?oidc_error=...`，不是回 JSON**：这条路是浏览器的顶层跳转，
+  回一段 JSON 的话用户看到的是满屏大括号，而他只是点了个「单点登录」。
+- **`redirect_url` 优先用配置里写死的那个**。按请求 Host 现拼出来的地址在反代后面
+  多半和 IdP 那边登记的不一样，而地址对不上 IdP 会直接拒绝授权请求。
+
+### 导航数据：每人一份，分类 → 卡片两层，后端权威，localStorage 只是缓存
 
 ```
 { title, theme, groups: [ { id, name, items: [ { id, name, url, desc, icon, proxy } ] } ] }
 ```
+
+**前端看到的形状一个字没变**，变的是它落在三张表里，而且每一行都带 `user_id`。
+`load` / `save` 都必须给出是谁的——没有「当前用户」这种全局状态，漏传一个参数
+就变成串号。前端那个 `id` 存进 `client_id`，**不换成数据库主键**：前端整棵树拿它做 key，
+拖拽、编辑、`/api/proxy/<id>` 全指着它。
+
+**存一次 = 把这个人那棵树整个删掉再插一遍**，一个事务里做完。不做逐条 diff：
+一棵树撑死几百行，diff 省下的那点写入量换不回它带来的一堆边界情况。
 
 一个分类在页面上画成一张大卡（[NavGroup.vue](webside/src/components/NavGroup.vue)）。
 前端这一侧全在 [webside/src/store.js](webside/src/store.js) 的 `pull()` / `push()` 两个
@@ -123,8 +196,12 @@ pyinstaller.bat                   # 产物 Releases\<版本>\Portal.exe
 - **进页面先画缓存不等接口**，后端连不上时照常能看能改。改动一发生就打一个
   `portal-nav:dirty` 标记，推成功才清掉；下次进来看到标记就**先推后拉**，
   免得把本机没同步的改动冲掉。
-- **界面是被刻意削到只剩分类和卡片的**：标题栏、主题切换、搜索、退出、导入导出、
+- **界面仍然是被刻意削到只剩分类和卡片的**：标题栏、主题切换、搜索、导入导出、
   底部统计，都是按要求逐条去掉的，不是漏写的。加回去之前先问一声。
+  **右上角那一小块是多用户绕不过去才加回来的**（当前登录的是谁、账号、用户管理、退出）：
+  一个人的门户不需要「我是谁」，多个人的必须有，不然同一台电脑上换了个人登，
+  看着一模一样的页面，改了半天才发现改的是别人那份。它是绝对定位的，
+  不占 `.groups` 上面一行——占一行的话一屏能看到的卡片就少一排。
   （卡片表单的 label 和 placeholder 一度也被去掉，后来按要求加回来了：
   编辑态字段是填好的，placeholder 顶不上来，只剩 label 认得出哪栏是哪栏。）
 - **`nav.title` 页面上不显示了，但照样读进来、照样写回去**：谁在 conf.json 里手写了
@@ -133,9 +210,15 @@ pyinstaller.bat                   # 产物 Releases\<版本>\Portal.exe
 - **页面上没有任何「存失败了」的提示**：`sync.offline` 还在 store.js 里照常维护，
   但没有 UI 读它了。要加提示的话接这个字段，别另起一套。
 - **冲突是后写的盖先写的**，不做合并。自己给自己看的一页东西，为它做合并不值当。
-- **卡片和分类里有哪些字段后端不管**（`navstore.clean` 只看标题、主题、条数和体积，
-  别的字段原样带过）：让后端跟着校验的话，卡片上加个字段就得两头一起改。
-  加字段只改 store.js 的 `normalize()`。
+- **卡片和分类里有哪些字段后端不管**（`navstore.clean` 只看标题、主题、条数和体积）。
+  摊不进列的字段**原样进 `extra` 这个 JSON 列**，读出来再摊回卡片上——这是上一版
+  「加字段只改 store.js」那条约定的延续。列写死的话，前端加一个字段就得改表结构、
+  改 SQL、改两头的代码。
+- **本机缓存的键按账号分**（`portal-nav:u<用户 id>`，见 store.js 的 `navKey()`）。
+  继续用固定键的话，同一台电脑上换个账号登进来，先画出来的是**上一个人的导航**，
+  而且页面一起来就把它当成「本机这份」推给后端，等于拿 A 的导航盖掉 B 的。
+  单账号那一版留下的 `portal-nav` 由 `readLocal` 认领一次就搬走，第二个人登进来时
+  那儿已经什么都没有了。
 - **401 由 [api.js](webside/src/api.js) 的 `setUnauthorizedHandler` 统一接**，
   [auth.js](webside/src/auth.js) 注册进去把 `auth.user` 清掉退回登录页；App.vue 再
   `watch` 到它停掉自动保存，不然它会对着 401 一直重试。反向 import 会成环，所以用回调。
@@ -155,8 +238,11 @@ pyinstaller.bat                   # 产物 Releases\<版本>\Portal.exe
   搜不到也不会报错，只会静默替换 0 次。用 `r"..."` 或 `\\`，并且每次 `replace` 都
   `assert old in s`。这个坑在这份代码上踩过两次。
 - 目录名是 `webside`（不是 website），别顺手改。
-- `backend/conf.json` 含明文口令和全部数据，已在 .gitignore 里，仓库里**不该**出现它。
-  没有 .example 模板文件，缺文件时由 config.py 的 `_DEFAULT` 现生成一份。
+- `backend/conf.json` 含数据库口令和 OIDC 的 client_secret，已在 .gitignore 里，
+  仓库里**不该**出现它。没有 .example 模板文件，缺文件时由 config.py 的 `_DEFAULT`
+  现生成一份（database 那一段要人自己填）。
+- **新增接口如果按用户取数据，user_id 一律从 `require_login` 拿**，别加一个
+  `?user_id=` 参数，也别从请求体里读。这是这一版最容易一次性做错、而且不会报错的地方。
 
 ### 门户代理：卡片上的开关，后端 [proxy.py](backend/app/proxy.py) 转发
 
@@ -192,9 +278,19 @@ pyinstaller.bat                   # 产物 Releases\<版本>\Portal.exe
   [proxyrewrite.py](backend/app/proxyrewrite.py) 的 `allow_for`。
 - 直接转发模式只认卡片自己那台机器，地址里塞不进主机名（老形状的链接继续认）。
 - 两种模式都只转 http/https（卡片填 `ssh://` 的也有，那种转不了）。
-- **要登录**，这是仓库里最该要登录的接口：它把门户的内网可达性借给了调用方。
-  WebSocket 上**不能**挂 `require_login`——它抛 HTTPException，握手这会儿没人接，
-  结果是 500 而不是干净的拒绝；那条路自己查一遍 Cookie，不对就按 1008 关掉。
+- **要登录，而且要是「这张卡片的主人」。** 归属校验就是 `_target(user_id, item_id)`
+  那一句：查的是 `_targets(user_id)` 这张**按人建的**表，不是先查全局表再比对 user_id。
+  比对写法只要哪天多一条取卡片的路就漏一次，而漏一次的后果是「拿到别人的卡片 id
+  就能借门户往那台机器上打」。多用户之后卡片 id 不再全局唯一（前端那个 `uid()`
+  是本机随机生成的），撞上就是串号。
+  返回 404 时**不区分**「不是你的」「存在但没开代理」「压根没这张卡片」——分开说
+  等于让人拿一串 id 去探别人的导航里有什么。
+- 目标表按用户缓存，失效有两道：`navstore.revision()`（进程内计数，**同进程里存完
+  导航下一个请求就看得到新的**）+ 5 秒 TTL（兜住别的进程改了库）。只留 TTL 的话，
+  自己刚改完卡片地址、点进去还是老的，查起来很懵。
+- WebSocket 上**不能**挂 `require_login`——它抛 HTTPException，握手这会儿没人接，
+  结果是 500 而不是干净的拒绝；那条路自己查一遍 Cookie（`user_from_token`），
+  不对就按 1008 关掉，查出来的 user 一样要拿去建目标表。
 - **转给上游之前要把 `portal_session` 从 Cookie 里摘掉。** 上游页面在浏览器眼里
   和门户同源，所以这枚 Cookie 会跟着发过来；原样转过去等于把登录门户那张票
   交给内网那台机器。上游自己种的 Cookie 不受影响：它们的 `Path` 被改写成
@@ -282,16 +378,18 @@ pyinstaller.bat                   # 产物 Releases\<版本>\Portal.exe
 - **被代理的页面和门户同源**，它里面的脚本能拿门户的会话去调 `/api/nav`。
   `Fallback` 顺手挡了一道（带 Referer 的 `/api/xxx` 会被转回代理底下），但绕得开。
   内网后台是自己人，公网站点可就不是了——真要紧的站别和门户放在一起。
+  **多用户之后这条更要紧**：绕过去拿到的是**当前这个登录用户**的会话，
+  他能调 `/api/nav` 改自己的导航；要是他还是管理员，`/api/users` 那一整套也在同源之内。
 
-### 图标缓存是磁盘目录，不进 conf.json
+### 图标缓存是磁盘目录，不进数据库
 
 `/api/icon` 抓回来的图落在 `ICON_DIR`（[config.py](backend/app/config.py)）里，
 源码态是 `backend/icons`，打包后是 exe 同级的 `icons`。目录启动时自动建
 （[iconcache.py](backend/app/iconcache.py) 的 `ensure`），**整个删掉也没事**，
 下次访问自己会重建重抓；已在 .gitignore 里。
 
-- **不塞进 conf.json**：是一堆几十 KB 的二进制，而且随时可以重抓，塞进去只会让
-  「拷走一个文件就是备份」变成拷走几 MB。
+- **不塞进数据库**：是一堆几十 KB 的二进制，而且随时可以重抓。塞进去只会让备份
+  和主从同步平白多扛几 MB，换不回任何东西——整个目录删掉，下次访问自己会重建重抓。
 - **「抓不到」也要存**（`<指纹>.miss`，6 小时）。不存的话，一个没有 favicon 的站点
   会让每次开门户都去外网白跑一趟，超时还得干等 6 秒。抓到的存 7 天。
 - **写缓存先写 `.tmp` 再 `os.replace`**：中途断电不会留下半张图被当成好的发出去。
@@ -308,6 +406,11 @@ pyinstaller.bat                   # 产物 Releases\<版本>\Portal.exe
 图标三处同一张：exe 图标、托盘图标、运行窗口图标都用门户网页的 favicon
 （`webside/public/favicon.ico` / `favicon.png`，指南针）。换图标只换这两个文件，
 spec 和 [tray.py](backend/app/tray.py) 的 `icon_path` 会跟着走。
+
+**这一版的 exe 不再是「拷过去双击就能用」**：它要连一个 MySQL。发布目录里还是
+只有 `Portal.exe` 一个文件，但第一次跑起来要先把它生成的 `conf.json` 里 database
+那一段填对，否则启动时会 `SystemExit` 并在运行窗口里说清楚原因（`logwindow.hold`
+会把窗口按住，见下）。
 
 ### 双击是桌面程序
 
@@ -350,6 +453,8 @@ exe 打成 **windowed（`console=False`）**：双击不弹 CMD 黑框，起来�
   环境里会顺藤摸瓜拖出 pytest / IPython / Qt，最后以「multiple Qt bindings」构建失败。
   依赖全是纯 Python，靠静态分析加自带 hook 就够，只有 uvicorn 那几个按字符串名字导入的
   协议实现要手写进 `hiddenimports`。
+- **`pymysql` 要显式列进 `hiddenimports`**：它按 conf.json 里的 charset 在运行时挑
+  编解码器，静态分析看不见，漏了的表现是「exe 一连库就 `LookupError: unknown encoding`」。
 - 脚本自己就叫 `pyinstaller.bat`，所以里面必须写 `python -m PyInstaller`——
   裸写 `pyinstaller` 会被 cmd 解析成这个脚本本身，死循环。
 - **发布目录只放 Portal.exe**：`conf.json` 不从本机拷，那里面是这台机器自己的口令和数据。

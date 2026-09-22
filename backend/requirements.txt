@@ -1,3 +1,8 @@
 fastapi>=0.115
 uvicorn[standard]>=0.30
 httpx>=0.27
+
+# MySQL 驱动。挑 PyMySQL 而不是 mysqlclient / mysql-connector：它是纯 Python 单包，
+# 装的时候不用编译、不用先装 MySQL 的开发库，PyInstaller 也能靠静态分析打进 exe。
+# 见 backend/app/db.py 顶上那段。
+PyMySQL>=1.1

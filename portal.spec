@@ -51,10 +51,16 @@ hiddenimports = [
     # 真的 import 一遍每个模块，副作用（比如 app.config 生成 conf.json）会落到
     # 构建机器上，而不是跑 exe 的那台。
     'app', 'app.main', 'app.config', 'app.auth', 'app.navstore',
+    'app.db', 'app.users', 'app.oidc',       # MySQL 数据层、用户表、单点登录
     'app.icon', 'app.iconcache', 'app.proxy',
     'app.proxyrewrite', 'app.proxyhook',     # 整站代理的正文改写和注入脚本
     'app.routers', 'app.routers.auth', 'app.routers.nav',
+    'app.routers.users', 'app.routers.account',
     'app.logwindow', 'app.tray',     # 桌面外壳，见下面那段
+
+    # PyMySQL 按 conf.json 里的 charset 在运行时挑编解码器，静态分析看不见。
+    # 漏了的表现是「exe 一连库就 LookupError: unknown encoding: utf8mb4」
+    'pymysql', 'pymysql.cursors',
 
     # 各站的特化规则。**新写一个站点文件就要在这儿加一行**——这一串是显式列的
     # （理由见上面那段），漏了的话源码态好好的，exe 里那个站就只剩通用规则：
