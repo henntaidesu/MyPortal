@@ -9,8 +9,11 @@
     GET  /api/idp/cards/<卡片 id>             卡片编辑框：这张卡片登记的客户端（管理员）
     PUT  /api/idp/cards/<卡片 id>             卡片编辑框：登记 / 修改（管理员）
 
-`idp.enabled` 关着时 oidc 那几条一律 404，和没有这几条路一样。卡片那两条不看它：
-先把客户端登记好、再去开 conf.json 是正常顺序，编辑框里会提示还没开。
+    GET  /api/idp/settings                    提供方总开关 / issuer / 客户端一览（管理员）
+    PUT  /api/idp/settings                    改总开关 / issuer（管理员），即刻生效
+
+总开关关着时 oidc 那几条一律 404，和没有这几条路一样。卡片和设置那几条不看它：
+先把客户端登记好、再打开总开关是正常顺序，编辑框里会提示还没开。
 """
 import base64
 from html import escape
@@ -28,15 +31,22 @@ _NO_STORE = {'cache-control': 'no-store', 'pragma': 'no-cache'}
 
 
 def _enabled() -> None:
-    if not config.IDP_ENABLED:
-        raise HTTPException(404, '门户没有开单点登录提供方（conf.json 的 idp.enabled）')
+    if not idp.settings()['enabled']:
+        raise HTTPException(404, '门户没有开单点登录提供方（右上角菜单 → 单点登录）')
+
+
+def _request_origin(request: Request) -> str:
+    proto = request.headers.get('x-forwarded-proto') or request.url.scheme
+    host = request.headers.get('x-forwarded-host') or request.headers.get('host') or ''
+    return f'{proto}://{host}'
 
 
 def _issuer(request: Request) -> str:
-    """配置里写死了就用配置里那个。没写就按这次请求现拼——只有浏览器那一跳会走到这儿，
+    """设置里写死了就用那个。没写就按这次请求现拼——只有浏览器那一跳会走到这儿，
     拼出来的就是浏览器看到的地址。"""
-    if config.IDP_ISSUER:
-        return config.IDP_ISSUER
+    issuer = idp.settings()['issuer']
+    if issuer:
+        return issuer
     proto = request.headers.get('x-forwarded-proto') or request.url.scheme
     host = request.headers.get('x-forwarded-host') or request.headers.get('host') or ''
     return f'{proto}://{host}'
@@ -167,7 +177,7 @@ class CardClientIn(BaseModel):
 
 def _card_payload(request: Request, client: dict | None) -> dict:
     return {
-        'idp_enabled': config.IDP_ENABLED,
+        'idp_enabled': idp.settings()['enabled'],
         # 对方系统里那栏「门户地址」要填的就是它，编辑框里照着显示出来让人抄
         'issuer': _issuer(request),
         'client': client,
@@ -190,3 +200,38 @@ def put_card_client(item_id: str, body: CardClientIn, request: Request,
         raise HTTPException(400, str(exc)) from None
     print(f'[单点登录] {admin["username"]} 在卡片上登记了客户端 {saved["client_id"]}')
     return _card_payload(request, saved)
+
+
+# ---------------------------------------------------------------- 设置（总开关 / issuer）
+
+class SettingsIn(BaseModel):
+    enabled: bool | None = None
+    issuer: str | None = None        # 空串 = 按请求现拼
+
+
+def _settings_payload(request: Request) -> dict:
+    cfg = idp.settings()
+    return {
+        'enabled': cfg['enabled'],
+        'issuer': cfg['issuer'],
+        # 没填 issuer 时实际会用的那个，页面上给人看「现在等于什么」
+        'effective_issuer': _issuer(request),
+        'request_origin': _request_origin(request),
+        'clients': idp.all_clients(),
+    }
+
+
+@router.get('/api/idp/settings')
+def get_settings(request: Request, admin: dict = Depends(auth.require_admin)):
+    return _settings_payload(request)
+
+
+@router.put('/api/idp/settings')
+def put_settings(body: SettingsIn, request: Request, admin: dict = Depends(auth.require_admin)):
+    try:
+        cfg = idp.save_settings(enabled=body.enabled, issuer=body.issuer)
+    except idp.IdpError as exc:
+        raise HTTPException(400, str(exc)) from None
+    print(f'[单点登录] {admin["username"]} 把提供方设成 '
+          f'{"开" if cfg["enabled"] else "关"}，issuer={cfg["issuer"] or "按请求现拼"}')
+    return _settings_payload(request)

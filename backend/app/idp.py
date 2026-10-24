@@ -4,6 +4,12 @@
 别的系统是 RP。只做授权码流程这一条路（+ PKCE），不做 implicit / hybrid /
 client_credentials / refresh_token：接进来的都是有后端的系统，用得上的只有这一条。
 
+## 总开关和 issuer 存在库里
+
+`portal_meta` 的 `idp_enabled` / `idp_issuer` 两个键，页面上（右上角菜单 → 单点登录，管理员）
+改，即刻生效、不用重启。老版本写在 conf.json `idp.enabled` / `idp.issuer` 里的值，
+库里还没有这两个键时**搬一次**进来（`_seed`），之后 conf.json 那两项就不再看了。
+
 ## 客户端从哪来
 
 两处，撞了 client_id 以前者为准：
@@ -66,6 +72,80 @@ class IdpError(Exception):
 
 def _b64(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).decode('ascii').rstrip('=')
+
+
+# ---------------------------------------------------------------- 客户端
+
+# ---------------------------------------------------------------- 总开关 / issuer
+
+K_ENABLED = 'idp_enabled'
+K_ISSUER = 'idp_issuer'
+_SETTINGS_TTL = 5            # 同进程里改完当场清；这 5 秒只是兜多实例
+
+_settings: Optional[dict] = None
+_settings_at = 0.0
+
+
+def normalize_issuer(raw: str) -> str:
+    """只认 `http(s)://主机[:端口][/路径]`，去掉末尾的 /。非法返回 None，空串返回空串。"""
+    value = (raw or '').strip().rstrip('/')
+    if not value:
+        return ''
+    parts = urlsplit(value)
+    if parts.scheme not in ('http', 'https') or not parts.netloc or parts.query or parts.fragment:
+        return None
+    return value
+
+
+def _seed() -> None:
+    """老 conf.json 里的 idp.enabled / issuer 搬进库里，只搬一次（库里有键就不搬）。"""
+    if db.meta_get(K_ENABLED) is not None:
+        return
+    db.meta_set(K_ENABLED, '1' if config.IDP_ENABLED else '0')
+    db.meta_set(K_ISSUER, normalize_issuer(config.IDP_ISSUER) or '')
+
+
+def settings() -> dict:
+    """{enabled, issuer}。issuer 为空 = 按请求现拼。"""
+    global _settings, _settings_at
+    now = time.time()
+    if _settings is None or now - _settings_at > _SETTINGS_TTL:
+        _seed()
+        _settings = {'enabled': db.meta_get(K_ENABLED) == '1',
+                     'issuer': db.meta_get(K_ISSUER) or ''}
+        _settings_at = now
+    return dict(_settings)
+
+
+def save_settings(*, enabled: Optional[bool] = None, issuer: Optional[str] = None) -> dict:
+    global _settings
+    if issuer is not None:
+        value = normalize_issuer(issuer)
+        if value is None:
+            raise IdpError('invalid_request', '门户地址格式不对，应为 http(s)://域名[:端口]，末尾不带 /')
+        db.meta_set(K_ISSUER, value)
+    if enabled is not None:
+        db.meta_set(K_ENABLED, '1' if enabled else '0')
+    _settings = None
+    return settings()
+
+
+def all_clients() -> list[dict]:
+    """设置框里列一下现在认哪些客户端。**不带 client_secret。**"""
+    out = [{'client_id': c['client_id'], 'name': c['name'], 'redirect_uris': c['redirect_uris'],
+            'source': 'conf', 'enabled': True, 'owner': ''} for c in config.IDP_CLIENTS.values()]
+    with db.cursor() as cur:
+        cur.execute("SELECT c.client_id, c.name, c.redirect_uris, c.enabled, u.username, "
+                    "(u.is_active = 1 AND u.role = 'admin') AS owner_ok "
+                    "FROM idp_clients c JOIN users u ON u.id = c.owner_id ORDER BY c.name")
+        for row in cur.fetchall():
+            uris = db.loads(row.get('redirect_uris'))
+            out.append({'client_id': row['client_id'], 'name': row['name'],
+                        'redirect_uris': uris if isinstance(uris, list) else [],
+                        'source': 'card', 'owner': row['username'],
+                        'enabled': bool(row['enabled']) and bool(row['owner_ok']),
+                        'shadowed': row['client_id'] in config.IDP_CLIENTS})
+    return out
 
 
 # ---------------------------------------------------------------- 客户端
@@ -356,8 +436,9 @@ def redirect_with(uri: str, params: dict) -> str:
 
 
 def describe() -> str:
-    if not config.IDP_ENABLED:
-        return '没开'
+    cfg = settings()
+    if not cfg['enabled']:
+        return '没开（右上角菜单 → 单点登录 里打开）'
     names = [c['name'] for c in config.IDP_CLIENTS.values()]
     try:
         with db.cursor() as cur:
@@ -365,4 +446,4 @@ def describe() -> str:
             names += [f'{r["name"]}（卡片）' for r in cur.fetchall()]
     except Exception:
         pass
-    return f'开着（{"、".join(names) or "一个客户端都没登记"}），issuer={config.IDP_ISSUER or "按请求现拼"}'
+    return f'开着（{"、".join(names) or "一个客户端都没登记"}），issuer={cfg['issuer'] or "按请求现拼"}'

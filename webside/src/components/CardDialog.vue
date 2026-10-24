@@ -63,6 +63,21 @@ async function loadIdp() {
   idp.loaded = true
 }
 
+/* 打开提供方总开关（存在库里，即刻生效）。门户地址没设过的话顺手按当前访问地址填上——
+   这里显示给人抄的就是它，两边一致才验得过 iss */
+async function enableIdp() {
+  try {
+    const cur = await api('/api/idp/settings')
+    const res = await api('/api/idp/settings', {
+      method: 'PUT', body: { enabled: true, issuer: cur.issuer || cur.request_origin }
+    })
+    idp.enabled = res.enabled
+    idp.issuer = res.effective_issuer
+  } catch (e) {
+    error.value = '开启失败：' + (e?.message || '未知错误')
+  }
+}
+
 /* 默认 client_id 取域名第一段（freemm.makurochan.com → freemm）。不能带点，见 app/idp.py */
 function defaultClientId() {
   const host = getHost(form.url).replace(/^www\./, '').split(':')[0]
@@ -267,8 +282,9 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
         <!-- 门户这边的客户端登记：只有管理员能做（等于交出「以任意人身份登进那个系统」的钥匙） -->
         <template v-if="isAdmin">
           <p v-if="idp.loaded && !idp.enabled" class="jar warn-box">
-            门户还没开单点登录提供方（conf.json 的 <code>idp.enabled</code>），
-            这里登记了也要等它打开、重启后才生效。
+            门户的单点登录提供方还没开，登记了也不生效。
+            <button type="button" class="link" :disabled="saving" @click="enableIdp">立即开启</button>
+            （门户地址等设置在右上角菜单 → 单点登录）
           </p>
 
           <label class="field">

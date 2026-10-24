@@ -99,11 +99,9 @@ _DEFAULT: dict[str, Any] = {
     },
     # 门户自己当 OIDC 提供方（app/idp.py），给导航里那些系统做单点登录。
     # 和上面 oidc 那段方向相反：那段是门户去外面的 IdP 认人，这段是别人来门户认人
+    # 总开关和 issuer 不在这儿了：存在库里，页面上（右上角菜单 → 单点登录）改。
+    # 这里只剩可选的客户端清单，一般也不用写——在导航卡片上登记更省事
     'idp': {
-        'enabled': False,
-        # 浏览器看到的门户地址（https://portal.example.com）。留空就按请求的 Host 现拼，
-        # 但客户端那边配的「门户地址」必须和这里一字不差，id_token 的 iss 就是它
-        'issuer': '',
         # 每个接入的系统一条。redirect_uris 逐字比对，经门户代理打开的系统要把
         # 代理底下那个回调地址也登记上（见 README「门户当单点登录提供方」）
         'clients': [],
@@ -291,6 +289,7 @@ if OIDC_ENABLED and not (OIDC_ISSUER and OIDC_CLIENT_ID):
                      '       填好再启动，或者先把 oidc.enabled 改成 false。')
 
 # ---------------------------------------------------------------- 门户当 IdP
+# 这两项只用来把老版本的值搬进库里一次（app/idp.py 的 _seed），之后以库里为准
 IDP_ENABLED = _bool('idp', 'enabled', False)
 IDP_ISSUER = _str('idp', 'issuer').rstrip('/')
 

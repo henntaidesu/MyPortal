@@ -5,6 +5,7 @@ import CardDialog from './components/CardDialog.vue'
 import LoginView from './components/LoginView.vue'
 import AccountDialog from './components/AccountDialog.vue'
 import UsersDialog from './components/UsersDialog.vue'
+import SsoDialog from './components/SsoDialog.vue'
 import ImportDialog from './components/ImportDialog.vue'
 import { state, removeItem, addGroup, removeGroup, boot, unbind } from './store'
 import { end as endDrag } from './drag'
@@ -20,7 +21,7 @@ const dialog = ref(null)   // { group, item } | null，item 为 null 表示新�
  * 一个人的门户不需要「我是谁」，多个人的必须有——不然同一台电脑上换了个人登，
  * 看着一模一样的页面，改了半天才发现改的是别人的那份。
  */
-const panel = ref('')      // '' | 'account' | 'users' | 'import'
+const panel = ref('')      // '' | 'account' | 'users' | 'import' | 'sso'
 const menu = ref(false)
 
 function closeMenu() {
@@ -100,6 +101,7 @@ function onPageDrop() {
         <button @click="panel = 'import'; menu = false">导入导航</button>
         <button @click="panel = 'account'; menu = false">账号</button>
         <button v-if="auth.user.is_admin" @click="panel = 'users'; menu = false">用户管理</button>
+        <button v-if="auth.user.is_admin" @click="panel = 'sso'; menu = false">单点登录</button>
         <button class="out" @click="menu = false; logout()">退出登录</button>
       </div>
     </div>
@@ -131,6 +133,7 @@ function onPageDrop() {
     <ImportDialog v-if="panel === 'import'" @close="panel = ''" />
     <AccountDialog v-if="panel === 'account'" @close="panel = ''" />
     <UsersDialog v-if="panel === 'users'" @close="panel = ''" />
+    <SsoDialog v-if="panel === 'sso'" @close="panel = ''" />
   </div>
 </template>
 

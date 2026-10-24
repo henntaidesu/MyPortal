@@ -146,12 +146,12 @@ Okta、Auth0、Google 等。在 `conf.json` 里填：
 **最省事的登记方式是在导航卡片上**（管理员）：编辑那个系统的卡片 → 「单点登录」选「开启」→
 填回调地址（Client ID 和 Client Secret 会自动生成，复制到系统那边），保存即生效，不用重启。
 之后点这张卡片就是直接带着门户身份登进去；「单点登录」关着时卡片照常直接打开网页。
-也可以照下面这样写在 conf.json 里（改完要重启），撞了 client_id 以 conf.json 为准。
+**提供方的总开关和门户地址（issuer）在右上角菜单 → 单点登录**（管理员），存在库里、即刻生效。
+客户端也可以照下面这样写在 conf.json 里（改完要重启），撞了 client_id 以 conf.json 为准；
+老版本写在这一段的 `enabled` / `issuer` 首次启动时搬进库里，之后不再看。
 
 ```json
 "idp": {
-  "enabled": true,
-  "issuer": "https://portal.example.com",
   "clients": [
     {
       "client_id": "dlsite-media",
@@ -166,7 +166,7 @@ Okta、Auth0、Google 等。在 `conf.json` 里填：
 }
 ```
 
-- `issuer` 是浏览器看到的门户地址，系统那边填的「门户地址」必须和它一字不差。
+- 门户地址（issuer）是浏览器看到的门户地址，系统那边填的「门户地址」必须和它一字不差。
 - `redirect_uris` 逐字比对。系统经门户代理打开时回调地址在代理底下，两个都要登记。
 - 端点：`/.well-known/openid-configuration`、`/api/oidc/authorize`、`/api/oidc/token`、
   `/api/oidc/userinfo`。`sub` 是门户用户 id，用户名在 `preferred_username`，

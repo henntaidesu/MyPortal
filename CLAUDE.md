@@ -172,7 +172,10 @@ pyinstaller.bat                   # 产物 Releases\<版本>\Portal.exe
 
 #### 门户当 IdP 这一路（[idp.py](backend/app/idp.py) + [routers/idp.py](backend/app/routers/idp.py)）
 
-和 oidc.py 方向相反：导航里的系统来门户认人。客户端两处来源，撞了 client_id 以 conf.json 为准：
+和 oidc.py 方向相反：导航里的系统来门户认人。**总开关和 issuer 存在 `portal_meta`**
+（`idp_enabled` / `idp_issuer`，`idp.settings()` 读、5 秒缓存，右上角菜单 → 单点登录 改，
+[SsoDialog.vue](webside/src/components/SsoDialog.vue)），不在 conf.json：老 conf.json 的
+`idp.enabled` / `idp.issuer` 只在库里还没有这两个键时搬一次（`_seed`）。客户端两处来源，撞了 client_id 以 conf.json 为准：
 conf.json 的 `idp.clients`（启动时读），和**卡片编辑框里登记的**（`idp_clients` 表，不用重启）。
 
 - **卡片上的「单点登录」开关**（`sso` / `ssoLogin` 走卡片 extra）：关着点卡片直接打开 url；
