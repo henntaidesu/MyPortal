@@ -1,6 +1,7 @@
 <script setup>
 import { reactive, ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import NavIcon from './NavIcon.vue'
+import HintTip from './HintTip.vue'
 import { state, addItem, updateItem } from '../store'
 import { api } from '../api'
 import { auth } from '../auth'
@@ -241,24 +242,23 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
            形状和上面两栏一致（标题 + 一个下拉框），不用勾选框，理由同上 -->
       <template v-if="form.proxy">
         <label class="field">
-          <span class="lb">Cookie 代理</span>
+          <span class="lb">Cookie 代理
+            <HintTip v-if="form.cookieJar" :warn="jar?.available === false">
+              登录一次之后，换设备、换浏览器、清缓存都不用重登。
+              <strong>登录凭证会加密存在门户的数据库里</strong>，
+              谁能登进这个门户账号，谁就能以你的身份用那个站点。
+              <span v-if="jar && jar.available === false" class="warn">{{ jar.reason }}</span>
+              <span v-else-if="jar && jar.count" class="saved">
+                已保存 {{ jar.count }} 条（{{ jar.domains.join('、') }}）
+                <button type="button" class="link" @click="clearJar">清除</button>
+              </span>
+            </HintTip>
+          </span>
           <select v-model="form.cookieJar">
             <option :value="false">关闭</option>
             <option :value="true">开启 · 登录态存在服务器</option>
           </select>
         </label>
-        <p v-if="form.cookieJar" class="jar">
-          <span>
-            登录一次之后，换设备、换浏览器、清缓存都不用重登。
-            <strong>登录凭证会加密存在门户的数据库里</strong>，
-            谁能登进这个门户账号，谁就能以你的身份用那个站点。
-          </span>
-          <span v-if="jar && jar.available === false" class="warn">{{ jar.reason }}</span>
-          <span v-else-if="jar && jar.count" class="saved">
-            已保存 {{ jar.count }} 条（{{ jar.domains.join('、') }}）
-            <button type="button" class="link" @click="clearJar">清除</button>
-          </span>
-        </p>
       </template>
 
       <!-- 只有整站模式用得上，所以平时不占位置。站点自己那几个域名后端内置了一份
@@ -271,7 +271,21 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
       <!-- 开了之后点卡片先去那个系统的「门户登录」入口，回来就是登录状态；关着就直接打开地址。
            形状和上面几栏一样是「标题 + 下拉框」 -->
       <label class="field">
-        <span class="lb">单点登录</span>
+        <span class="lb">单点登录
+          <!-- 门户这边的说明只给管理员看：登记客户端只有管理员能做 -->
+          <HintTip v-if="form.sso && isAdmin" :warn="idp.loaded && !idp.enabled">
+            <span v-if="idp.loaded && !idp.enabled" class="warn first">
+              门户的单点登录提供方还没开，登记了也不生效。
+              <button type="button" class="link" :disabled="saving" @click="enableIdp">立即开启</button>
+              （门户地址等设置在右上角菜单 → 单点登录）
+            </span>
+            在那个系统的单点登录设置里填：门户地址
+            <code class="pick" title="点一下复制" @click="copy(idp.issuer, 'iss')">{{ idp.issuer || '…' }}</code>
+            <span v-if="copied === 'iss'">（已复制）</span>，
+            Client ID、Client Secret 与下面一致。
+            <strong>密钥保存后不再显示</strong>，忘了就点「生成」换一串，两边一起改。
+          </HintTip>
+        </span>
         <select v-model="form.sso">
           <option :value="false">关闭 · 直接打开网页</option>
           <option :value="true">开启 · 用门户账号登录</option>
@@ -281,14 +295,8 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
       <template v-if="form.sso">
         <!-- 门户这边的客户端登记：只有管理员能做（等于交出「以任意人身份登进那个系统」的钥匙） -->
         <template v-if="isAdmin">
-          <p v-if="idp.loaded && !idp.enabled" class="jar warn-box">
-            门户的单点登录提供方还没开，登记了也不生效。
-            <button type="button" class="link" :disabled="saving" @click="enableIdp">立即开启</button>
-            （门户地址等设置在右上角菜单 → 单点登录）
-          </p>
-
           <label class="field">
-            <span class="lb">回调地址<em>一行一个，逐字比对</em></span>
+            <span class="lb">回调地址<HintTip>一行一个，与那个系统的回调地址逐字比对。</HintTip></span>
             <textarea v-model="idp.uris" rows="2" spellcheck="false"
               placeholder="例如：https://freemm.makurochan.com/mercariV2/src/use_web/sso/callback"></textarea>
           </label>
@@ -322,14 +330,6 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
           <input v-model="form.ssoLogin" spellcheck="false" @keyup.enter="submit"
             :placeholder="derivedLogin ? '留空：' + derivedLogin : '那个系统的「门户登录」地址'" />
         </label>
-
-        <p v-if="isAdmin" class="jar">
-          在那个系统的单点登录设置里填：门户地址
-          <code class="pick" title="点一下复制" @click="copy(idp.issuer, 'iss')">{{ idp.issuer || '…' }}</code>
-          <span v-if="copied === 'iss'">（已复制）</span>，
-          Client ID、Client Secret 与上面一致。
-          <strong>密钥保存后不再显示</strong>，忘了就点「生成」换一串，两边一起改。
-        </p>
       </template>
 
       <label class="field">
@@ -398,40 +398,32 @@ h3 { margin: 0 0 16px; font-size: 16px; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.jar {
-  margin: 8px 0 0;
-  padding: 9px 11px;
-  border-radius: var(--radius-sm);
-  background: var(--surface-2);
-  color: var(--text-3);
-  font-size: 12px;
-  line-height: 1.55;
-}
-.jar strong { color: var(--text-2); font-weight: 600; }
-.jar .saved, .jar .warn { display: block; margin-top: 6px; }
-.jar .warn { color: var(--danger); }
-.jar .link {
+/* 感叹号浮层里的内容（插槽内容带的是本组件的 scope，样式写在这儿） */
+.lb strong { color: var(--text-2); font-weight: 600; }
+.lb .saved, .lb .warn { display: block; margin-top: 6px; }
+.lb .warn { color: var(--danger); }
+.lb .warn.first { margin: 0 0 6px; }
+.lb .link {
   padding: 0 0 0 4px;
   color: var(--danger);
   font-size: 12px;
   text-decoration: underline;
 }
-
-.jar code {
+.lb code {
   padding: 0 4px;
   border-radius: 4px;
-  background: var(--surface);
+  background: var(--surface-2);
   color: var(--text-2);
   word-break: break-all;
 }
-.jar .pick { cursor: copy; }
-.warn-box { color: var(--danger); margin-top: 12px; }
+.lb .pick { cursor: copy; }
 .row { display: flex; gap: 8px; }
 .row input { flex: 1; min-width: 0; }
 .row .btn { flex: none; height: 38px; }
 
 .field { display: block; margin-top: 12px; }
 .lb {
+  position: relative;      /* HintTip 的浮层按它摆，宽度与这一栏相同 */
   display: flex;
   align-items: baseline;
   gap: 6px;
