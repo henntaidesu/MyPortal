@@ -18,13 +18,14 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import cookiejar, db, iconcache, navstore, oidc, proxy, users
+from . import cookiejar, db, iconcache, idp, navstore, oidc, proxy, users
 from .config import CONF_PATH, DIST_DIR, HOST, PORT, uses_default_password
 from .icon import router as icon_router
 from .proxy import router as proxy_router
 from .routers.account import router as account_router
 from .routers.auth import router as auth_router
 from .routers.cookies import router as cookies_router
+from .routers.idp import router as idp_router
 from .routers.nav import router as nav_router
 from .routers.users import router as users_router
 
@@ -59,6 +60,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     print(f'[portal] 用户 {users.describe()}')
     print(f'[portal] 导航 {navstore.describe()}')
     print(f'[portal] 单点登录 {oidc.describe()}')
+    print(f'[portal] 单点登录提供方 {idp.describe()}')
     print(f'[portal] 图标缓存 {iconcache.describe()}')
     print(f'[portal] 门户代理 {proxy.describe()}')
     print(f'[portal] Cookie 代理 {cookiejar.describe()}')
@@ -90,6 +92,7 @@ app = FastAPI(title='Portal', version='3.0.0', lifespan=lifespan)
 app.add_middleware(proxy.Fallback)
 
 app.include_router(auth_router)
+app.include_router(idp_router)
 app.include_router(account_router)
 app.include_router(cookies_router)
 app.include_router(users_router)

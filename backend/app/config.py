@@ -97,6 +97,17 @@ _DEFAULT: dict[str, Any] = {
         'admin_claim': 'groups',
         'admin_claim_value': '',
     },
+    # 门户自己当 OIDC 提供方（app/idp.py），给导航里那些系统做单点登录。
+    # 和上面 oidc 那段方向相反：那段是门户去外面的 IdP 认人，这段是别人来门户认人
+    'idp': {
+        'enabled': False,
+        # 浏览器看到的门户地址（https://portal.example.com）。留空就按请求的 Host 现拼，
+        # 但客户端那边配的「门户地址」必须和这里一字不差，id_token 的 iss 就是它
+        'issuer': '',
+        # 每个接入的系统一条。redirect_uris 逐字比对，经门户代理打开的系统要把
+        # 代理底下那个回调地址也登记上（见 README「门户当单点登录提供方」）
+        'clients': [],
+    },
 }
 
 
@@ -278,6 +289,37 @@ if OIDC_ENABLED and not (OIDC_ISSUER and OIDC_CLIENT_ID):
     raise SystemExit(f'[配置] {CONF_PATH} 里 oidc.enabled 是 true，'
                      '但 issuer / client_id 没填全。\n'
                      '       填好再启动，或者先把 oidc.enabled 改成 false。')
+
+# ---------------------------------------------------------------- 门户当 IdP
+IDP_ENABLED = _bool('idp', 'enabled', False)
+IDP_ISSUER = _str('idp', 'issuer').rstrip('/')
+
+
+def _idp_clients() -> dict[str, dict]:
+    """client_id → {client_id, client_secret, name, redirect_uris}。缺项的整条拒收。"""
+    raw = _section('idp').get('clients')
+    out: dict[str, dict] = {}
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict):
+            continue
+        cid = str(item.get('client_id') or '').strip()
+        secret = str(item.get('client_secret') or '')
+        uris = item.get('redirect_uris')
+        if isinstance(uris, str):
+            uris = [uris]
+        uris = [str(u).strip() for u in (uris or []) if str(u).strip()]
+        if not (cid and secret and uris):
+            raise SystemExit(f'[配置] {CONF_PATH} 的 idp.clients 里有一条没填全'
+                             '（client_id / client_secret / redirect_uris 三项都要有）。')
+        if len(secret) < 32:
+            # id_token 是拿它做 HMAC 签的，太短等于能被人现场爆破出来再伪造身份
+            raise SystemExit(f'[配置] idp.clients 里 {cid} 的 client_secret 太短，至少 32 个字符（HS256 的密钥长度下限）。')
+        out[cid] = {'client_id': cid, 'client_secret': secret,
+                    'name': str(item.get('name') or cid), 'redirect_uris': uris}
+    return out
+
+
+IDP_CLIENTS = _idp_clients()
 
 if not ALLOW_LOCAL_LOGIN and not OIDC_ENABLED:
     # 两条登录路都关了 = 谁都进不来，而且登录页上一个按钮都不会有

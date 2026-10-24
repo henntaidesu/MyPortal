@@ -10,9 +10,11 @@
 **要登录**，而且这是仓库里最该要登录的一个接口：它把门户的网络可达性借给了调用方。
 目标地址不是调用方给的，是拿卡片 id 去**当前登录这个人自己的**卡片里查出来的
 （`navstore.cards(user_id)`）；整站模式下地址里虽然带了主机名，但那个主机必须落在
-这张卡片的白名单内（见 app/proxyrewrite.py 的 `allow_for`）。
-**这条白名单是唯一的安全边界，别去掉**——不拦的话这个代理对登录者就是
-「想连哪台连哪台」的开放中继，而门户多半正站在内网里。
+这张卡片的白名单内（见 app/proxyrewrite.py 的 `allow_for`），
+**或者**解析出来全是公网地址（`_public`）——后一条是给「从页面里点链接跳到外站」用的，
+外站那一页也要走代理，不然又从用户自己的出口 IP 直连了。
+**这两道是安全边界，别去掉**——不拦的话这个代理对登录者（以及被代理页面里的脚本）
+就是「想连哪台连哪台」的开放中继，而门户多半正站在内网里。
 
 ## 两种模式，卡片上选
 
@@ -65,6 +67,7 @@
 import asyncio
 import contextlib
 import inspect
+import ipaddress
 import re
 import time
 from typing import Any, NamedTuple, Optional
@@ -99,7 +102,23 @@ _HOP = frozenset({
 # 来访者信息由门户自己填（直接转发模式下）。顺手把调用方带上来的同名首部丢掉——
 # 这几个头谁都能伪造，转给上游等于让上游的 IP 白名单形同虚设
 _FORWARDED = frozenset({'x-forwarded-for', 'x-forwarded-proto', 'x-forwarded-host',
-                        'forwarded', 'x-real-ip'})
+                        'forwarded', 'x-real-ip',
+                        # 门户前面挂着 CDN（Cloudflare 那类）时它们塞进来的。**只在走公网域名时
+                        # 才有**，所以表现成「内网地址访问好好的，走域名就坏」：
+                        # 上游自己多半也在 Cloudflare 后面，见到 cf-connecting-ip 直接 403
+                        # （メルカリ 就是这样，接口一片 403，页面换成「エラーが発生しました」），
+                        # 而且这几个头里装着用户的真实 IP 和国家，整站模式本来就是要藏它们的
+                        'cdn-loop', 'true-client-ip', 'x-client-ip', 'via'})
+
+
+def _dropped(low: str) -> bool:
+    """转给上游前要丢掉的请求首部（逐跳 + 来访者信息 + CDN 塞进来的那些）。
+
+    `cf-` 开头的整族都丢：cf-connecting-ip / cf-ipcountry / cf-ray / cf-visitor 之外，
+    开了 Cloudflare Access 的还会带 `cf-access-jwt-assertion`——那是登录**门户**的凭据，
+    和 portal_session 一个性质，更不能交给上游。
+    """
+    return low in _HOP or low in _FORWARDED or low == 'host' or low.startswith('cf-')
 
 # 响应里要摘掉的几个首部。它们讲的都是「这个源站」的规矩，而现在页面顶着的是
 # 门户这个域名，照搬过来只会拦到自己：
@@ -236,9 +255,87 @@ def _target(user_id: int, item_id: str) -> Target:
     return target
 
 
-def _rewriter(target: Target) -> Rewriter:
-    return Rewriter(target.mount, target.allow, webside.browser_js(target.module),
+def _rewriter(target: Target, foreign: str = '') -> Rewriter:
+    """`foreign` 是白名单之外、从链接点过来的那台主机（见 `_upstream`）。
+
+    这时候页面在它那边，它自己那一族域名上的资源也该跟着走代理，
+    所以这一次的改写把它的注册域临时并进白名单——只影响这一份响应，卡片的白名单不变。
+    """
+    allow = target.allow
+    if foreign:
+        name = foreign.lower().split(':', 1)[0]
+        allow = tuple(sorted({*allow, name, proxyrewrite.site_of(name)}))
+    return Rewriter(target.mount, allow, webside.browser_js(target.module),
                     webside.rewrite_js(target.module))
+
+
+# ---------------------------------------------------------------- 白名单之外：只许公网
+
+# 主机名 → (过期时间, 是不是公网)。一页几十个子资源都要问一遍，不缓存的话每个请求
+# 都去解析一次 DNS。60 秒：DNS 记录变了，最多一分钟后跟上
+_PUBLIC_TTL = 60.0
+_public_cache: dict[str, tuple[float, bool]] = {}
+
+
+def _ip_public(text: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(text.split('%', 1)[0])
+    except ValueError:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped                            # ::ffff:10.0.0.1 这种绕法
+    return ip.is_global and not ip.is_multicast
+
+
+async def _public(host: str) -> Optional[bool]:
+    """这台主机是不是**只**解析到公网地址。解析不了返回 None。
+
+    白名单之外的主机（从链接点过去的外站）靠这一道兜：公网站点随便转，
+    内网、本机、链路本地（169.254.169.254 那种云元数据地址）一律不转。
+    **解析出来的地址要全是公网才算**——一个域名同时带着公网和内网两条记录，
+    httpx 连的是哪条说不准。
+
+    挡不住 DNS rebinding（查的时候给公网、连的时候给内网）：httpx 自己再解析一遍。
+    这条缝和「被代理的页面能调 /api/nav 给自己加一张指向内网的卡片」是同一个量级，
+    见 CLAUDE.md 门户代理那节末尾。
+    """
+    name = host.lower()
+    if name.startswith('['):
+        name = name[1:].split(']', 1)[0]
+    else:
+        name = name.rsplit(':', 1)[0] if name.count(':') == 1 else name
+    if not name:
+        return False
+    try:
+        ipaddress.ip_address(name.split('%', 1)[0])
+        return _ip_public(name)                        # 本身就是 IP，不用解析
+    except ValueError:
+        pass
+    if '.' not in name:
+        return False                                   # nas、gitlab 这种单标签名字只会是内网
+
+    now = time.monotonic()
+    hit = _public_cache.get(name)
+    if hit and hit[0] > now:
+        return hit[1]
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(name, None)
+    except OSError:
+        return None
+    ok = bool(infos) and all(_ip_public(info[4][0]) for info in infos)
+    if len(_public_cache) > 4096:
+        _public_cache.clear()
+    _public_cache[name] = (now + _PUBLIC_TTL, ok)
+    return ok
+
+
+async def _check_foreign(host: str) -> None:
+    ok = await _public(host)
+    if ok is None:
+        raise HTTPException(502, f'门户解析不了 {host}')
+    if not ok:
+        # 白名单之外只转公网。放宽了，被代理页面里的一段脚本就能借门户去连内网任意一台机器
+        raise HTTPException(403, f'这张卡片不转 {host}（不在它的域名白名单里，也不是公网地址）')
 
 
 # ---------------------------------------------------------------- 地址
@@ -257,15 +354,19 @@ def _raw_path(scope) -> str:
     return scope.get('path', '')
 
 
-def _upstream(target: Target, scope) -> tuple[str, str, str]:
-    """从请求路径里解出「转给谁」：(协议, 主机, 剩下的路径)。"""
+def _upstream(target: Target, scope) -> tuple[str, str, str, bool]:
+    """从请求路径里解出「转给谁」：(协议, 主机, 剩下的路径, 是不是白名单之外)。
+
+    白名单之外的（从链接点过去的外站）这里先放过，调用方必须接着
+    `await _check_foreign(host)`——只许公网那一道要解析 DNS，得是异步的。
+    """
     path = _raw_path(scope)
     mount = target.mount
     rest = path[len(mount):] if path.startswith(mount) else path.lstrip('/')
 
     if not rest.startswith(MARK + '/'):
         # 老形状：/api/proxy/<id>/<路径>，转给卡片自己那台机器
-        return target.scheme, target.host, rest
+        return target.scheme, target.host, rest, False
 
     bits = rest[len(MARK) + 1:].split('/', 2)
     if len(bits) < 2 or bits[0] not in ('http', 'https'):
@@ -274,10 +375,11 @@ def _upstream(target: Target, scope) -> tuple[str, str, str]:
     tail = bits[2] if len(bits) > 2 else ''
     if not _HOSTNAME.match(host):
         raise HTTPException(400, '代理地址里的主机名不对')
-    if not target.site or not proxyrewrite.host_ok(host, target.allow):
-        # 白名单这道别放宽。放宽了，任何登录者都能拿这个接口当跳板去连内网任意一台机器
-        raise HTTPException(403, f'这张卡片不转 {host}（不在它的域名白名单里）')
-    return scheme, host, tail
+    if not target.site:
+        raise HTTPException(403, f'这张卡片不转 {host}（没开整站模式）')
+    # 白名单之外的交给 `_check_foreign` 查公网。这道别省：省了，任何登录者都能拿
+    # 这个接口当跳板去连内网任意一台机器
+    return scheme, host, tail, not proxyrewrite.host_ok(host, target.allow)
 
 
 def _real_url(target: Target, value: str) -> str:
@@ -431,7 +533,7 @@ def _request_headers(request: Request, target: Target, scheme: str, host: str,
     seen_cookie = False
     for name, value in request.headers.items():
         low = name.lower()
-        if low in _HOP or low in _FORWARDED or low == 'host':
+        if _dropped(low):
             continue
         if low == 'cookie':
             seen_cookie = True
@@ -555,12 +657,13 @@ def _rewrite_location(value: str, target: Target, scheme: str, host: str,
                       rewriter: Optional[Rewriter]) -> str:
     """跳转地址：能转的折回代理底下，转不了的原样留着。
 
-    原样留着是有意的：见到 `Location: <随便什么地址>` 就替人跟过去的话，
-    这个代理就成了开放中继。整站模式下「能不能转」由白名单说了算，
-    直接转发模式下只认卡片自己那台机器。
+    整站模式下跳到别的站也折回来（和点链接出去是一回事）：跳过去那一下
+    由浏览器重新发请求，到时候 `_check_foreign` 会查它是不是公网，
+    内网地址照样转不过去，所以这里不会变成开放中继。
+    直接转发模式下只认卡片自己那台机器，别处的原样留着。
     """
     if rewriter is not None:
-        return rewriter.url(value, scheme, host)
+        return rewriter.url(value, scheme, host, nav=True)
     mount = target.mount
     if value.startswith('//'):
         return value                                   # //host/x，换机器了
@@ -669,8 +772,10 @@ def enter(item_id: str, user: dict = Depends(require_login)):
 async def forward(item_id: str, path: str, request: Request,
                   user: dict = Depends(require_login)):
     target = _target(int(user['id']), item_id)
-    scheme, host, rest = _upstream(target, request.scope)
-    rewriter = _rewriter(target) if target.site else None
+    scheme, host, rest, foreign = _upstream(target, request.scope)
+    if foreign:
+        await _check_foreign(host)
+    rewriter = _rewriter(target, host if foreign else '') if target.site else None
 
     url = f'{scheme}://{host}/{rest}'
     query = request.url.query
@@ -839,9 +944,11 @@ async def forward_ws(ws: WebSocket, item_id: str, path: str):
         await ws.close(code=1011)
         return
     try:
-        scheme, host, rest = _upstream(target, ws.scope)
+        scheme, host, rest, foreign = _upstream(target, ws.scope)
+        if foreign:
+            await _check_foreign(host)
     except HTTPException:
-        await ws.close(code=1008)      # 主机名不在白名单里
+        await ws.close(code=1008)      # 主机名不在白名单里，也不是公网
         return
 
     url = f'{"wss" if scheme == "https" else "ws"}://{host}/{rest}'
@@ -855,7 +962,7 @@ async def forward_ws(ws: WebSocket, item_id: str, path: str):
         low = name.lower()
         # sec-websocket-* 和 upgrade 那几个由 websockets 自己重新握手时生成，
         # 原样带过去会和它生成的撞成两份
-        if low in _HOP or low in _FORWARDED or low == 'host' or low.startswith('sec-websocket-'):
+        if _dropped(low) or low.startswith('sec-websocket-'):
             continue
         if low == 'cookie':
             seen_cookie = True
@@ -939,6 +1046,11 @@ def _fallback_target(scope) -> Optional[str]:
     path = scope.get('path', '')
     if path.startswith(PREFIX + '/'):
         return None                       # 已经在代理底下了
+    if path.startswith('/api/oidc/'):
+        # 门户当 IdP 的那几个端点（app/idp.py）。经代理打开的系统点「门户单点登录」时，
+        # 浏览器跳过来那一下带的 Referer 正是代理页面——不放过的话授权请求会被
+        # 转回那个系统自己身上，单点登录永远走不通
+        return None
 
     referer = host = ''
     for raw_name, raw_value in scope.get('headers') or []:

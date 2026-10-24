@@ -18,8 +18,12 @@
 
 2. **改写响应正文**里的地址：HTML/CSS/JS/JSON 里凡是指向**白名单内**主机的完整地址，
    都换成上面那个形状。白名单外的原样留着（浏览器直连，转不转都不该由这个代理决定）。
+   **例外是「点过去的页面」**：`<a href>`、`<form action>`、`Location` 这几处指向
+   白名单之外的，也折回代理底下——不然从メルカリ 点一个外链出去，那一页就又从
+   用户自己的出口 IP 直连了。这一类在 app/proxy.py 请求那一刻另有一道关：
+   **只放行解析到公网地址的主机**（`_public`），所以放开它不会把内网漏出去。
 
-**白名单是这里唯一的安全边界**，别去掉：主机名是从 URL 里来的，谁登进来都能随手填一个。
+**白名单（加上白名单外那道「只许公网」）是这里的安全边界**，别去掉：主机名是从 URL 里来的，谁登进来都能随手填一个。
 不拦的话这个代理对登录者就成了「想连哪台连哪台」的开放中继（SSRF 中继），
 而门户多半正站在内网里。白名单由卡片地址的注册域 + `app/proxy_webside/` 下那个站点的
 附带域名 + 卡片上手填的那几个凑出来，见 `allow_for`。
@@ -179,6 +183,13 @@ _ATTR = re.compile(r"""
     (?P<q>["'])(?P<v>/(?!/)[^"'>]*)(?P=q)
 """, re.X | re.I)
 
+# 会换页的那几种标签，和它们身上指向别处的完整地址（见 `Rewriter._nav`）
+_NAV_TAG = re.compile(r'<(?:a|area|form|button|input)\b[^>]*>', re.I)
+_NAV_ATTR = re.compile(r"""
+    (?P<pre>\s(?:href|action|formaction)\s*=\s*)
+    (?P<q>["'])(?P<v>(?:https?:)?//[^"'>]*)(?P=q)
+""", re.X | re.I)
+
 _SRCSET = re.compile(r"""(?P<pre>\s(?:srcset|imagesrcset)\s*=\s*)(?P<q>["'])(?P<v>[^"'>]*)(?P=q)""",
                      re.X | re.I)
 
@@ -219,11 +230,14 @@ class Rewriter:
 
     # ---------------- 单个地址
 
-    def url(self, raw: str, scheme: str, host: str) -> str:
+    def url(self, raw: str, scheme: str, host: str, nav: bool = False) -> str:
         """一个地址 → 代理底下的地址。转不了的原样返回（调用方照原样用）。
 
         Location 和 Link 首部也走这儿，所以四种形状都要认：完整地址、
         协议相对（`//host/x`）、根绝对（`/x`）、相对（原样）。
+
+        `nav=True` 是「点过去的页面」（链接、表单、跳转）：白名单之外的主机也折进来，
+        能不能真转由 app/proxy.py 在请求那一刻查（只放行公网地址，见 `_public`）。
         """
         value = (raw or '').strip()
         if not value:
@@ -232,7 +246,7 @@ class Rewriter:
             return raw                                  # 已经在代理底下了
         if value.startswith('//'):
             head, _, tail = value[2:].partition('/')
-            if not host_ok(head, self.allow):
+            if '@' in head or not (nav or host_ok(head, self.allow)):
                 return raw
             return f'{self.base}{scheme}/{head}/{tail}' if tail else f'{self.base}{scheme}/{head}/'
         if value.startswith('/'):
@@ -241,7 +255,7 @@ class Rewriter:
         if not m:
             return raw                                  # 相对地址，或者 ws:/mailto: 这类
         up, head, tail = m.group(1).lower(), m.group(2), m.group(3)
-        if '@' in head or not host_ok(head, self.allow):
+        if '@' in head or not (nav or host_ok(head, self.allow)):
             # 带 userinfo 的地址（user@host）不接：主机名在哪一段上容易看走眼，
             # 而看走眼的后果是白名单被绕过
             return raw
@@ -293,6 +307,7 @@ class Rewriter:
         text = _META_KILL.sub('', text)
         text = _INTEGRITY.sub('', text)
         text = self._absolute(text, scheme)             # 先换完整地址
+        text = _NAV_TAG.sub(lambda m: self._nav(m, scheme, host), text)   # 再换点出去的链接
         text = _ATTR.sub(lambda m: self._root(m, scheme, host), text)
         text = _SRCSET.sub(lambda m: self._srcset(m, scheme, host), text)
         text = _CSS_URL.sub(lambda m: self._root(m, scheme, host), text)   # style="..." 里的
@@ -319,6 +334,18 @@ class Rewriter:
         if value.startswith(self.mount):
             return m.group(0)                           # 上一道已经换过了，别套两层
         return f'{m.group("pre")}{m.group("q")}{self.base}{scheme}/{host}{value}{m.group("q")}'
+
+    def _nav(self, m: re.Match, scheme: str, host: str) -> str:
+        """链接 / 表单标签里指向**白名单之外**的完整地址：点过去的页面也走代理。
+
+        只动 `<a>` `<area>` `<form>` 和提交按钮这几种「会换页」的标签，
+        `<script src>` `<img src>` `<link href>` 这类子资源照旧：白名单外的第三方
+        （统计、广告、字体）没必要全从门户绕一圈。
+        """
+        def one(a: re.Match) -> str:
+            new = self.url(a.group('v'), scheme, host, nav=True)
+            return f'{a.group("pre")}{a.group("q")}{new}{a.group("q")}'
+        return _NAV_ATTR.sub(one, m.group(0))
 
     def _srcset(self, m: re.Match, scheme: str, host: str) -> str:
         """srcset 是「地址 描述符」用逗号隔开的一串，得一个一个换。"""

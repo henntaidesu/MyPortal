@@ -170,6 +170,19 @@ pyinstaller.bat                   # 产物 Releases\<版本>\Portal.exe
 - **`redirect_url` 优先用配置里写死的那个**。按请求 Host 现拼出来的地址在反代后面
   多半和 IdP 那边登记的不一样，而地址对不上 IdP 会直接拒绝授权请求。
 
+#### 门户当 IdP 这一路（[idp.py](backend/app/idp.py) + [routers/idp.py](backend/app/routers/idp.py)）
+
+和 oidc.py 方向相反：导航里的系统来门户认人。客户端登记在 conf.json 的 `idp.clients`，
+不做页面注册（登记一个客户端等于交出「以任意人身份登进那个系统」的钥匙）。
+
+- **授权码存在进程内字典里，60 秒、一次性**——全仓库唯一一处服务端存票，因为签名串做不到一次性。
+- **access_token 带 token_version**，改口令 / 停用 / 踢下线后 userinfo 当场不认。
+- **id_token 用各客户端自己的 client_secret 做 HS256**，不上 RS256（要密钥对和 jwks，还会把 cryptography 变成必需）。
+- **redirect_uri 逐字比对，不对时停在门户报错页、绝不跳回去**（开放重定向）。
+- **`proxy.Fallback` 放过 `/api/oidc/`**：经代理打开的系统跳来授权时带着代理页面的 Referer，
+  不放过会被 307 回那个系统身上。授权端点在没登录时跳 `/?continue=...` 也带 `Referrer-Policy: no-referrer`，同理。
+- 前端登录后由 App.vue 的 `continueSso()` 照着 `continue` 跳回，**只认 `/api/oidc/authorize?` 开头的**。
+
 ### 导航数据：每人一份，分类 → 卡片两层，后端权威，localStorage 只是缓存
 
 ```
@@ -292,11 +305,21 @@ pyinstaller.bat                   # 产物 Releases\<版本>\Portal.exe
 
     /api/proxy/<id>/__portal__/<http|https>/<主机[:端口]>/<路径>
 
-- **能转到哪些主机由白名单说了算，这是唯一的安全边界。** 主机名是从 URL 里来的，
-  谁登进来都能随手填一个，不拦的话这个代理就成了「想连哪台连哪台」的开放中继
+- **能转到哪些主机由「白名单 + 只许公网」两道说了算，这是安全边界。** 主机名是从 URL
+  里来的，谁登进来都能随手填一个，不拦的话这个代理就成了「想连哪台连哪台」的开放中继
   （SSRF 中继），而门户多半正站在内网里。白名单 = 卡片地址的注册域（子域算数）
   + 站点模块带的那几个（见下）+ 卡片上手填的「额外域名」，拼在
   [proxyrewrite.py](backend/app/proxyrewrite.py) 的 `allow_for`。
+- **白名单之外的主机也转，但只转公网**（proxy.py 的 `_public`：DNS 解析出来的地址
+  **全部** `is_global` 才算，单标签名字、内网、本机、169.254 一律 403）。这是为了
+  「从页面里点链接跳到外站，那一页也走代理」——不然点出去的那页又从用户自己的
+  出口 IP 直连了。只有**会换页**的地址才往白名单外折：`<a>`/`<area>`/`<form>`/提交按钮
+  的地址、`window.open`、`Location` 跳转（proxyrewrite 的 `_nav`、proxyhook 的 `toNav`）；
+  `<script>`/`<img>`/`fetch` 这类子资源照旧只认白名单，第三方统计广告不必绕门户。
+  到了外站那一页，它自己的注册域会临时并进**这一次响应**的改写白名单（`_rewriter`
+  的 `foreign`），卡片的白名单不变。挡不住 DNS rebinding，量级和下面「被代理页面能调
+  `/api/nav`」那条一样。外站的 Cookie 和卡片那族站点共用 `/api/proxy/<id>/` 这一个路径，
+  同名的会互相顶掉。内网里另一台机器要转的话，把它填进卡片的「额外域名」。
 - 直接转发模式只认卡片自己那台机器，地址里塞不进主机名（老形状的链接继续认）。
 - 两种模式都只转 http/https（卡片填 `ssh://` 的也有，那种转不了）。
 - **要登录，而且要是「这张卡片的主人」。** 归属校验就是 `_target(user_id, item_id)`
@@ -318,6 +341,11 @@ pyinstaller.bat                   # 产物 Releases\<版本>\Portal.exe
   `/api/proxy/<id>/`，只跟着自己这个服务走（不改的话几个系统的同名 Cookie 会互相顶掉，
   表现成「开了 B 系统 A 系统就掉登录」）。http 门户下还要把 `Secure` 去掉、
   `SameSite=None` 降成 `Lax`，不然浏览器直接不存。
+- **CDN 塞进来的请求头也要摘掉**（proxy.py 的 `_dropped`：`cf-*` 整族、`cdn-loop`、
+  `true-client-ip`、`via`）。门户挂在 Cloudflare 后面时每个请求都带着它们，而上游自己
+  多半也在 Cloudflare 后面，见到 `cf-connecting-ip` 直接 403——メルカリ 就是这样，
+  表现成「内网地址访问好好的，走公网域名就坏」，本地怎么都复现不出来。
+  `cf-access-jwt-assertion` 是登录门户的凭据，和 `portal_session` 一样不能交出去。
 - **根绝对地址（`/static/x.js`）靠 Referer 兜底**，见 proxy.py 末尾的 `Fallback`：
   Referer 说这次请求出自 `/api/proxy/<id>/…` 的页面，就 307 转回代理底下。
   连 `/api/` 开头的也兜（只放过 `/api/proxy/` 自己）——上游系统自己也会有 `/api/xxx`，
@@ -363,8 +391,10 @@ pyinstaller.bat                   # 产物 Releases\<版本>\Portal.exe
   必然失败，而失败的表现是「这张卡片点了就报 502」，谁都想不到是证书。
 - **`read=None`（不设读超时）**：实时日志、SSE、长轮询都是一个请求挂很久。连接超时留着。
 - **`follow_redirects=False`**：跳转要交回浏览器，由它带着 Cookie 再来一趟，
-  地址栏才跟得上。`Location` 指向同一台机器时折回代理底下，指向别处的**原样留着**——
-  改写的话上游回一个 `Location: 任意地址` 门户就替人去访问了，又成了开放中继。
+  地址栏才跟得上。直接转发模式下 `Location` 指向同一台机器时折回代理底下，指向别处的
+  **原样留着**。整站模式下指向别处的也折回来，靠的是浏览器跟过去那一下还要过
+  「白名单或公网」那道关——**那道关不能省**，省了上游回一个 `Location: 任意地址`
+  门户就替人去访问了，又成了开放中继。
 - **`transfer-encoding` 必须滤掉**（逐跳首部）：httpx 交回来的已经是拆好块的字节，
   把这个头带回去浏览器会照着再拆一遍，拿到一堆长度前缀。
 - **转回去之前要看调用方认不认这种压缩**（`_accepts`）。整站模式下发给上游的

@@ -137,6 +137,39 @@ Okta、Auth0、Google 等。在 `conf.json` 里填：
 - 接了单点登录之后通常要把 `auth.allow_local_login` 改成 `false`，
   不然本地口令就是一条绕开 IdP 的后门。（两条都关掉的话谁都进不来，服务会拒绝启动。）
 
+## 门户当单点登录提供方（给导航里的系统用）
+
+门户自己也能当 OIDC 提供方，让导航里的系统「用门户账号登录」——和上面那段方向相反。
+只支持授权码流程（+ PKCE），id_token 用各客户端自己的 `client_secret` 做 HS256 签名。
+**两边都要开**：门户这边登记客户端，系统那边打开自己的单点登录配置项，缺一边都不生效。
+
+```json
+"idp": {
+  "enabled": true,
+  "issuer": "https://portal.example.com",
+  "clients": [
+    {
+      "client_id": "dlsite-media",
+      "client_secret": "至少 32 位的随机串",
+      "name": "DL媒体库",
+      "redirect_uris": [
+        "http://10.0.10.20:9800/api/sso/callback",
+        "https://portal.example.com/api/proxy/<卡片 id>/api/sso/callback"
+      ]
+    }
+  ]
+}
+```
+
+- `issuer` 是浏览器看到的门户地址，系统那边填的「门户地址」必须和它一字不差。
+- `redirect_uris` 逐字比对。系统经门户代理打开时回调地址在代理底下，两个都要登记。
+- 端点：`/.well-known/openid-configuration`、`/api/oidc/authorize`、`/api/oidc/token`、
+  `/api/oidc/userinfo`。`sub` 是门户用户 id，用户名在 `preferred_username`，
+  管理员带 `groups: ["admin"]`。
+- 系统那边用户名对不上怎么办由它自己定。DL媒体库的做法：先按 `sub` 认已绑定的人，
+  没绑过就按用户名找同名用户绑上，都没有就新建一个。
+- 改完 conf.json 要重启。
+
 ## 门户代理
 
 卡片编辑框里那一栏，让门户替浏览器把请求转出去——适合「门户这台机器够得着、

@@ -9,6 +9,8 @@ app/proxyrewrite.py 改的是**正文里写死的地址**，覆盖不到这几�
 所以再补一道：把 `fetch` / `XMLHttpRequest` / `WebSocket` / `Worker` 这些出口，
 以及元素的 `src` / `href` 这些属性全包一层，地址过一遍 `toProxy` 再放行。
 白名单之外的地址**原样放行**（照旧直连），和后端那道是同一条规矩。
+例外是「点过去的页面」（`<a>` / `<form>` 的地址、`window.open`，走 `toNav`）：
+那几处白名单外的也折进代理，由后端在请求那一刻查是不是公网地址再决定转不转。
 
 ## 有意做成这样
 
@@ -82,7 +84,14 @@ _JS = r"""
     return C.base + proto + '/' + host + rest;
   }
 
-  function toProxy(input) {
+  function toProxy(input) { return convert(input, false); }
+
+  /* 「点过去的页面」（链接、表单、window.open）：白名单之外的主机也折回代理底下。
+     能不能真转由后端在请求那一刻查（只放行公网地址，app/proxy.py 的 `_public`），
+     这里只管别让浏览器绕过门户直连出去 */
+  function toNav(input) { return convert(input, true); }
+
+  function convert(input, nav) {
     if (input === null || input === undefined) return input;
     var raw = String(input);
     if (!raw || raw.charAt(0) === '#') return input;
@@ -103,7 +112,8 @@ _JS = r"""
       try { me = new NativeURL(realHref()); } catch (e) { return input; }
       return mount(me.protocol.slice(0, -1), me.host, rest);
     }
-    if (!allowed(abs.hostname)) return input;
+    if (!nav && !allowed(abs.hostname)) return input;
+    if (abs.username || abs.password) return input;   /* user@host 不接，和后端一样 */
     return mount(abs.protocol.slice(0, -1), abs.host, rest);
   }
 
@@ -139,7 +149,7 @@ _JS = r"""
     }).filter(Boolean).join(', ');
   }
 
-  window.__portal = { to: toProxy, ws: toProxyWs, real: realHref, cfg: C, un: unproxy };
+  window.__portal = { to: toProxy, nav: toNav, ws: toProxyWs, real: realHref, cfg: C, un: unproxy };
 
   /* ---------------- new URL(x, base) ---------------- */
 
@@ -290,7 +300,7 @@ _JS = r"""
   wrap(window, 'open', function (orig) {
     return function () {
       var args = Array.prototype.slice.call(arguments);
-      if (args[0]) { try { args[0] = toProxy(args[0]); } catch (e) {} }
+      if (args[0]) { try { args[0] = toNav(args[0]); } catch (e) {} }
       return orig.apply(window, args);
     };
   });
@@ -318,9 +328,17 @@ _JS = r"""
   [['HTMLScriptElement', 'src'], ['HTMLImageElement', 'src'], ['HTMLLinkElement', 'href'],
    ['HTMLIFrameElement', 'src'], ['HTMLSourceElement', 'src'], ['HTMLMediaElement', 'src'],
    ['HTMLVideoElement', 'poster'], ['HTMLEmbedElement', 'src'], ['HTMLObjectElement', 'data'],
-   ['HTMLTrackElement', 'src'], ['HTMLAnchorElement', 'href'], ['HTMLAreaElement', 'href'],
+   ['HTMLTrackElement', 'src']].forEach(function (p) { patchProp(p[0], p[1], toProxy); });
+  [['HTMLAnchorElement', 'href'], ['HTMLAreaElement', 'href'],
    ['HTMLFormElement', 'action'], ['HTMLInputElement', 'formAction'],
-   ['HTMLButtonElement', 'formAction']].forEach(function (p) { patchProp(p[0], p[1], toProxy); });
+   ['HTMLButtonElement', 'formAction']].forEach(function (p) { patchProp(p[0], p[1], toNav); });
+
+  /* 会换页的那几种标签：它们身上的地址按「点过去的页面」办（toNav） */
+  var NAVTAGS = { A: 1, AREA: 1, FORM: 1, BUTTON: 1, INPUT: 1 };
+  function convFor(el, attr) {
+    return el && NAVTAGS[el.tagName] && (attr === 'href' || attr === 'action' || attr === 'formaction')
+      ? toNav : toProxy;
+  }
   [['HTMLImageElement', 'srcset'], ['HTMLSourceElement', 'srcset']]
     .forEach(function (p) { patchProp(p[0], p[1], toSrcset); });
 
@@ -328,7 +346,7 @@ _JS = r"""
     return function (name, value) {
       try {
         var k = String(name).toLowerCase();
-        if (SETATTRS[k]) value = toProxy(value);
+        if (SETATTRS[k]) value = convFor(this, k)(value);
         else if (k === 'srcset' || k === 'imagesrcset') value = toSrcset(value);
       } catch (e) {}
       return orig.call(this, name, value);
@@ -351,7 +369,7 @@ _JS = r"""
     for (var i = 0; i < ATTRS.length; i++) {
       var a = ATTRS[i];
       if (!el.hasAttribute(a)) continue;
-      var v = el.getAttribute(a), n = toProxy(v);
+      var v = el.getAttribute(a), n = convFor(el, a)(v);
       if (n !== v) el.setAttribute(a, n);
     }
     if (el.hasAttribute('srcset')) {
@@ -376,6 +394,29 @@ _JS = r"""
         }
       }
     }).observe(document.documentElement, { childList: true, subtree: true });
+  } catch (e) {}
+
+  /* 点下去那一刻再兜一遍：链接的地址有的是框架直接改 DOM 属性以外的路子写进去的
+     （比如先建好节点、挂进文档之后才补 href，那一下 MutationObserver 看不见）。
+     捕获阶段、在站点自己的点击处理之前换好，浏览器随后照着换过的地址去 */
+  function fixTarget(el) {
+    for (; el && el.nodeType === 1; el = el.parentNode) {
+      if (el.tagName === 'A' || el.tagName === 'AREA') {
+        var h = el.getAttribute('href');
+        if (h) { var n = toNav(h); if (n !== h) el.setAttribute('href', n); }
+        return;
+      }
+    }
+  }
+  try {
+    document.addEventListener('click', function (ev) { try { fixTarget(ev.target); } catch (e) {} }, true);
+    document.addEventListener('auxclick', function (ev) { try { fixTarget(ev.target); } catch (e) {} }, true);
+    document.addEventListener('submit', function (ev) {
+      try {
+        var f = ev.target, a = f && f.getAttribute && f.getAttribute('action');
+        if (a) { var n = toNav(a); if (n !== a) f.setAttribute('action', n); }
+      } catch (e) {}
+    }, true);
   } catch (e) {}
 
   /* ---------------- 地址栏与 Cookie ---------------- */

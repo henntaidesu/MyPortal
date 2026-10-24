@@ -45,6 +45,20 @@ function newGroup() {
 }
 
 /**
+ * 别的系统来门户单点登录、而人还没登录时，后端把他送到 `/?continue=/api/oidc/authorize?...`
+ * （app/routers/idp.py）。登进来之后照着它跳回去，授权端点会接着把人送回那个系统。
+ *
+ * **只认 `/api/oidc/authorize` 开头的**：不拦的话 `?continue=https://坏站` 就是一个
+ * 开放重定向，地址栏上一跳还是门户，看着很可信。
+ */
+function continueSso() {
+  const target = new URLSearchParams(location.search).get('continue') || ''
+  if (!target.startsWith('/api/oidc/authorize?')) return false
+  location.replace(target)
+  return true
+}
+
+/**
  * 进出登录统一由 auth.user 驱动，一处管三种情况：开页面时已经登着、刚登录、会话过期。
  *
  * **别改回「LoginView 登录成功后 emit 一下，App 收到再 boot()」**：登录成功那一刻
@@ -53,6 +67,7 @@ function newGroup() {
  * 改的东西全只活在内存里。
  */
 watch(() => auth.user, (user) => {
+  if (user && continueSso()) return
   if (user) boot()       // 自己处理错误，不用 await
   else unbind()          // 会话过期：停掉自动保存，不然它会对着 401 一直重试
 })
