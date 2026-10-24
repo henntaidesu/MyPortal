@@ -302,6 +302,28 @@ _DDL = [
         REFERENCES users (id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Cookie 代理：外部站点的登录态'
     """,
+    """
+    CREATE TABLE IF NOT EXISTS idp_clients (
+      -- 门户当 IdP 时的客户端，在卡片编辑框里登记（app/idp.py）。conf.json 的
+      -- idp.clients 照样认，撞了 client_id 以 conf.json 为准
+      client_id     VARCHAR(64)     NOT NULL,
+      -- id_token 的 HS256 密钥，对方系统要拿同一串验签，所以只能存明文（conf.json 里也是）
+      client_secret VARCHAR(255)    NOT NULL,
+      name          VARCHAR(200)    NOT NULL DEFAULT '',
+      redirect_uris JSON            NOT NULL,
+      -- 登记在哪个管理员的哪张卡片上。item_id 是卡片的 client_id，理由同 proxy_cookies
+      owner_id      BIGINT UNSIGNED NOT NULL,
+      item_id       VARCHAR(64)     NOT NULL,
+      -- 卡片上的「单点登录」关掉 = 0。不删行：再打开时密钥还在，对方系统不用重配
+      enabled       TINYINT(1)      NOT NULL DEFAULT 1,
+      updated_at    TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP
+                                    ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (client_id),
+      UNIQUE KEY uk_idp_card (owner_id, item_id),
+      CONSTRAINT fk_idp_owner FOREIGN KEY (owner_id)
+        REFERENCES users (id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='门户当 IdP：卡片上登记的客户端'
+    """,
 ]
 
 

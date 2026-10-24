@@ -12,7 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 或者只有门户这台够得着的站点）。
 
 **数据在 MySQL 里，配置在 `backend/conf.json` 里，两者不混。**
-库里五张表：`users`（账号和口令哈希）、`user_identities`（OIDC 绑定）、
+库里五张表（另有 `proxy_cookies`、`idp_clients`）：`users`（账号和口令哈希）、`user_identities`（OIDC 绑定）、
 `nav_prefs` / `nav_groups` / `nav_items`（每人一份的导航），外加一张
 `portal_meta` 放签名密钥和迁移标记。conf.json 只剩连接串、监听地址、OIDC 参数。
 
@@ -172,8 +172,23 @@ pyinstaller.bat                   # 产物 Releases\<版本>\Portal.exe
 
 #### 门户当 IdP 这一路（[idp.py](backend/app/idp.py) + [routers/idp.py](backend/app/routers/idp.py)）
 
-和 oidc.py 方向相反：导航里的系统来门户认人。客户端登记在 conf.json 的 `idp.clients`，
-不做页面注册（登记一个客户端等于交出「以任意人身份登进那个系统」的钥匙）。
+和 oidc.py 方向相反：导航里的系统来门户认人。客户端两处来源，撞了 client_id 以 conf.json 为准：
+conf.json 的 `idp.clients`（启动时读），和**卡片编辑框里登记的**（`idp_clients` 表，不用重启）。
+
+- **卡片上的「单点登录」开关**（`sso` / `ssoLogin` 走卡片 extra）：关着点卡片直接打开 url；
+  开着点卡片去 `ssoLogin`（那个系统的「门户登录」入口），留空时编辑框从第一条回调地址推
+  （`…/callback` → `…/login?base=<站点根>/`，utils.js 的 `ssoLoginFrom`）。
+- **客户端登记只许管理员**（`/api/idp/cards/<卡片 id>` 挂 `require_admin`），而且 `idp.client()`
+  查的时候连着 users 表看登记人**现在**是不是启用中的管理员——登记客户端等于交出
+  「以任意人身份登进那个系统」的钥匙，普通账号不该有，被降级的管理员也不该还留着。
+- **client_secret 不进导航数据**：导航会缓存进 localStorage、被代理页面也能调 `/api/nav`。
+  所以客户端单独一张表，编辑框读回来只给 `secret_set`。
+- **开关关掉是 `enabled = 0` 不是删行**（`idp.sync`，在存导航那个事务里调，同 `cookiejar.retain`）：
+  再打开时密钥还在，对方系统不用重配。卡片删了的那行留着无害，它的 client_id 会被下一张
+  要用它的卡片收回（`save_card_client` 先查原卡片还在不在）。
+- **client_id 不许带 `.`**：access_token 是 `<用户>.<版本>.<client_id>.<过期>.<签名>`，带点 userinfo 就拆不开了。
+- 新卡片的 id 在编辑框里先生成（`addItem` 认 `payload.id`）：登记客户端要在卡片落进 state 之前用它；
+  登记失败编辑框不关，免得卡片说「走单点登录」而门户不认。
 
 - **授权码存在进程内字典里，60 秒、一次性**——全仓库唯一一处服务端存票，因为签名串做不到一次性。
 - **access_token 带 token_version**，改口令 / 停用 / 踢下线后 userinfo 当场不认。

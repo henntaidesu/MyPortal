@@ -3,7 +3,8 @@ import { reactive, ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import NavIcon from './NavIcon.vue'
 import { state, addItem, updateItem } from '../store'
 import { api } from '../api'
-import { getHost, normalizeUrl } from '../utils'
+import { auth } from '../auth'
+import { getHost, normalizeUrl, ssoLoginFrom, uid } from '../utils'
 
 const props = defineProps({
   /** 这张卡片所在（或将要加进）的分类 */
@@ -23,8 +24,78 @@ const form = reactive({
   proxyHosts: props.item?.proxyHosts || '',
   // 开了就把上游站点的登录态存在服务器上（见 app/cookiejar.py），换设备也不用重登
   cookieJar: !!props.item?.cookieJar,
+  // 单点登录：开了之后点卡片去 ssoLogin（那个系统的「门户登录」入口），关着就直接打开 url
+  sso: !!props.item?.sso,
+  ssoLogin: props.item?.ssoLogin || '',
   group: props.group.id          // 改成别的分类就等于把这张卡片搬过去
 })
+
+/* 新卡片的 id 在这儿先定下来：登记 IdP 客户端要在卡片落进 state 之前用它 */
+const cardId = props.item?.id || uid()
+
+/* ---- 门户这边的 IdP 客户端登记（app/idp.py 的 idp_clients 表），只有管理员看得到 ----
+   不跟着导航存：client_secret 进了导航就进了 localStorage 和 /api/nav */
+const isAdmin = computed(() => !!auth.user?.is_admin)
+const idp = reactive({
+  loaded: false,
+  enabled: true,         // conf.json 的 idp.enabled，没开时提示一句
+  issuer: '',
+  secretSet: false,      // 已存过密钥：输入框留空 = 不改
+  clientId: '',
+  secret: '',
+  uris: ''               // 一行一个
+})
+
+async function loadIdp() {
+  if (!isAdmin.value) return
+  try {
+    const res = await api('/api/idp/cards/' + encodeURIComponent(cardId))
+    idp.enabled = res.idp_enabled
+    idp.issuer = res.issuer
+    if (res.client) {
+      idp.clientId = res.client.client_id
+      idp.uris = res.client.redirect_uris.join('\n')
+      idp.secretSet = res.client.secret_set
+    }
+  } catch {
+    // 问不到就当没登记过，保存时照样能登记
+  }
+  idp.loaded = true
+}
+
+/* 默认 client_id 取域名第一段（freemm.makurochan.com → freemm）。不能带点，见 app/idp.py */
+function defaultClientId() {
+  const host = getHost(form.url).replace(/^www\./, '').split(':')[0]
+  return (host.split('.')[0] || 'client').replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 64)
+}
+
+function genSecret() {
+  const bytes = new Uint8Array(32)
+  crypto.getRandomValues(bytes)
+  idp.secret = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+// 打开开关时把空着的几栏先填上：client_id 推一个、密钥现生成一串，人只需要填回调地址
+function fillIdpDefaults() {
+  if (!form.sso || !isAdmin.value || !idp.loaded) return
+  if (!idp.clientId) idp.clientId = defaultClientId()
+  if (!idp.secretSet && !idp.secret) genSecret()
+}
+watch(() => [form.sso, idp.loaded], fillIdpDefaults)
+
+const uriList = computed(() => idp.uris.split(/\s+/).map((u) => u.trim()).filter(Boolean))
+const derivedLogin = computed(() => ssoLoginFrom(uriList.value[0]))
+
+const copied = ref('')
+async function copy(text, key) {
+  try {
+    await navigator.clipboard.writeText(text)
+    copied.value = key
+    setTimeout(() => { if (copied.value === key) copied.value = '' }, 1200)
+  } catch {
+    // http 部署下没有剪贴板 API，字段本身选得中，手动复制
+  }
+}
 
 const error = ref('')
 const nameInput = ref(null)
@@ -57,11 +128,38 @@ watch(() => form.url, (v) => {
   if (!form.name && v) form.name = getHost(v).replace(/^www\./, '')
 })
 
-function submit() {
+const saving = ref(false)
+
+async function submit() {
+  if (saving.value) return
   if (!form.name.trim()) return (error.value = '请填写名称')
   if (!form.url.trim()) return (error.value = '请填写地址')
+
+  if (form.sso) {
+    // 登录入口没填就从第一条回调地址推（…/callback → …/login?base=…）
+    if (!form.ssoLogin.trim() && isAdmin.value) form.ssoLogin = derivedLogin.value
+    if (!form.ssoLogin.trim()) return (error.value = '请填写单点登录入口')
+    if (isAdmin.value) {
+      // 先登记客户端，失败就停在框里——卡片说「走单点登录」而门户不认这个系统，
+      // 点开只会是一张报错页
+      saving.value = true
+      try {
+        const res = await api('/api/idp/cards/' + encodeURIComponent(cardId), {
+          method: 'PUT',
+          body: { client_id: idp.clientId.trim(), name: form.name.trim(),
+                  redirect_uris: uriList.value, client_secret: idp.secret.trim() }
+        })
+        idp.secretSet = !!res.client?.secret_set
+      } catch (e) {
+        return (error.value = e?.message || '登记失败')
+      } finally {
+        saving.value = false
+      }
+    }
+  }
+
   if (isEdit.value) updateItem(props.group.id, props.item.id, form)
-  else addItem(form.group, form)
+  else addItem(form.group, { ...form, id: cardId })
   emit('close')
 }
 
@@ -72,6 +170,7 @@ onMounted(() => {
   window.addEventListener('keydown', onKey)
   nameInput.value?.focus()
   loadJar()
+  loadIdp()
 })
 onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 </script>
@@ -154,6 +253,69 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
         <input v-model="form.proxyHosts" placeholder="逗号隔开，例如：example-cdn.com" @keyup.enter="submit" />
       </label>
 
+      <!-- 开了之后点卡片先去那个系统的「门户登录」入口，回来就是登录状态；关着就直接打开地址。
+           形状和上面几栏一样是「标题 + 下拉框」 -->
+      <label class="field">
+        <span class="lb">单点登录</span>
+        <select v-model="form.sso">
+          <option :value="false">关闭 · 直接打开网页</option>
+          <option :value="true">开启 · 用门户账号登录</option>
+        </select>
+      </label>
+
+      <template v-if="form.sso">
+        <!-- 门户这边的客户端登记：只有管理员能做（等于交出「以任意人身份登进那个系统」的钥匙） -->
+        <template v-if="isAdmin">
+          <p v-if="idp.loaded && !idp.enabled" class="jar warn-box">
+            门户还没开单点登录提供方（conf.json 的 <code>idp.enabled</code>），
+            这里登记了也要等它打开、重启后才生效。
+          </p>
+
+          <label class="field">
+            <span class="lb">回调地址<em>一行一个，逐字比对</em></span>
+            <textarea v-model="idp.uris" rows="2" spellcheck="false"
+              placeholder="例如：https://freemm.makurochan.com/mercariV2/src/use_web/sso/callback"></textarea>
+          </label>
+
+          <label class="field">
+            <span class="lb">Client ID</span>
+            <div class="row">
+              <input v-model="idp.clientId" spellcheck="false" placeholder="字母、数字、_ 和 -"
+                @keyup.enter="submit" />
+              <button type="button" class="btn" @click="copy(idp.clientId, 'id')">
+                {{ copied === 'id' ? '已复制' : '复制' }}
+              </button>
+            </div>
+          </label>
+
+          <label class="field">
+            <span class="lb">Client Secret</span>
+            <div class="row">
+              <input v-model="idp.secret" spellcheck="false"
+                :placeholder="idp.secretSet ? '已设置，留空不改' : '至少 32 个字符'" @keyup.enter="submit" />
+              <button v-if="idp.secret" type="button" class="btn" @click="copy(idp.secret, 'secret')">
+                {{ copied === 'secret' ? '已复制' : '复制' }}
+              </button>
+              <button type="button" class="btn" @click="genSecret">生成</button>
+            </div>
+          </label>
+        </template>
+
+        <label class="field">
+          <span class="lb">登录入口<em v-if="isAdmin">可选</em></span>
+          <input v-model="form.ssoLogin" spellcheck="false" @keyup.enter="submit"
+            :placeholder="derivedLogin ? '留空：' + derivedLogin : '那个系统的「门户登录」地址'" />
+        </label>
+
+        <p v-if="isAdmin" class="jar">
+          在那个系统的单点登录设置里填：门户地址
+          <code class="pick" title="点一下复制" @click="copy(idp.issuer, 'iss')">{{ idp.issuer || '…' }}</code>
+          <span v-if="copied === 'iss'">（已复制）</span>，
+          Client ID、Client Secret 与上面一致。
+          <strong>密钥保存后不再显示</strong>，忘了就点「生成」换一串，两边一起改。
+        </p>
+      </template>
+
       <label class="field">
         <span class="lb">描述<em>可选</em></span>
         <input v-model="form.desc" placeholder="一句话写清这是什么" @keyup.enter="submit" />
@@ -168,7 +330,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 
       <div class="foot">
         <button class="btn" @click="emit('close')">取消</button>
-        <button class="btn primary" @click="submit">{{ isEdit ? '保存' : '添加' }}</button>
+        <button class="btn primary" :disabled="saving" @click="submit">{{ isEdit ? '保存' : '添加' }}</button>
       </div>
     </div>
   </div>
@@ -238,6 +400,19 @@ h3 { margin: 0 0 16px; font-size: 16px; }
   font-size: 12px;
   text-decoration: underline;
 }
+
+.jar code {
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text-2);
+  word-break: break-all;
+}
+.jar .pick { cursor: copy; }
+.warn-box { color: var(--danger); margin-top: 12px; }
+.row { display: flex; gap: 8px; }
+.row input { flex: 1; min-width: 0; }
+.row .btn { flex: none; height: 38px; }
 
 .field { display: block; margin-top: 12px; }
 .lb {

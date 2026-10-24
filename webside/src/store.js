@@ -156,7 +156,12 @@ function normalizeItem(i) {
     proxyHosts: typeof i.proxyHosts === 'string' ? i.proxyHosts : '',
     // Cookie 代理：开了之后上游站点的登录态存在服务器上（app/cookiejar.py），
     // 换设备、清缓存都不掉登录。只有 proxy 开着时才有意义
-    cookieJar: !!i.cookieJar
+    cookieJar: !!i.cookieJar,
+    // 单点登录：开了之后点卡片去 ssoLogin（那个系统的「门户登录」入口），到了就是登录状态；
+    // 关着就照常打开 url。IdP 那边的客户端登记不在这儿，在 idp_clients 表（app/idp.py）——
+    // client_secret 不能跟着导航进 localStorage
+    sso: !!i.sso,
+    ssoLogin: typeof i.ssoLogin === 'string' ? i.ssoLogin : ''
   }
 }
 
@@ -429,13 +434,17 @@ export function addItem(gid, payload) {
   const group = findGroup(gid)
   if (!group) return
   group.items.push(normalizeItem({
+    // 编辑框可以先定好 id：登记 IdP 客户端要在卡片落进 state 之前用它
+    id: payload.id,
     name: payload.name.trim(),
     url: payload.url,
     desc: (payload.desc || '').trim(),
     icon: (payload.icon || '').trim(),
     proxy: proxyMode(payload.proxy),
     proxyHosts: (payload.proxyHosts || '').trim(),
-    cookieJar: !!payload.cookieJar
+    cookieJar: !!payload.cookieJar,
+    sso: !!payload.sso,
+    ssoLogin: (payload.ssoLogin || '').trim()
   }))
 }
 
@@ -451,6 +460,8 @@ export function updateItem(gid, id, payload) {
   item.proxy = proxyMode(payload.proxy)
   item.proxyHosts = (payload.proxyHosts || '').trim()
   item.cookieJar = !!payload.cookieJar
+  item.sso = !!payload.sso
+  item.ssoLogin = (payload.ssoLogin || '').trim()
 
   const to = payload.group && payload.group !== gid ? findGroup(payload.group) : null
   if (to) {

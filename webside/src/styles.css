@@ -52,7 +52,8 @@ button {
 }
 
 input,
-select {
+select,
+textarea {
   width: 100%;
   padding: 9px 12px;
   font: inherit;
@@ -64,12 +65,14 @@ select {
   transition: border-color .15s, box-shadow .15s;
 }
 input:focus,
-select:focus {
+select:focus,
+textarea:focus {
   border-color: var(--primary);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 18%, transparent);
 }
 
 select { height: 38px; cursor: pointer; }
+textarea { resize: vertical; line-height: 1.5; }
 
 .btn {
   display: inline-flex;

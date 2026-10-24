@@ -66,3 +66,22 @@ export function takeOverKey(oldKey, newKey) {
     console.warn('旧数据迁移失败，忽略', e)
   }
 }
+
+/**
+ * 从回调地址推一个「门户登录」入口：`…/callback` 换成 `…/login`，再带上 `base=<站点根>`。
+ * 接进来的两个系统都是这个形状（FreeMM 的 /mercariV2/src/use_web/sso/、
+ * DL 媒体库的 /api/sso/），base 告诉对方「回调地址拼在哪个前缀上」。
+ * 推不出来（不是 /callback 结尾）就返回空串，由人在编辑框里自己填。
+ *
+ * 经门户代理打开的系统 base 在代理底下，这里推不出那一层，那种要手填。
+ */
+export function ssoLoginFrom(callback) {
+  try {
+    const u = new URL((callback || '').trim())
+    if (!/\/callback$/.test(u.pathname)) return ''
+    const base = u.origin + '/'
+    return u.origin + u.pathname.replace(/\/callback$/, '/login') + '?base=' + encodeURIComponent(base)
+  } catch {
+    return ''
+  }
+}

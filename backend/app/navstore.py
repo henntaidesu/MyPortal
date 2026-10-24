@@ -33,7 +33,7 @@ import json
 import time
 from typing import Any, Optional
 
-from . import config, cookiejar, db
+from . import config, cookiejar, db, idp
 
 MAX_GROUPS = 50
 MAX_ITEMS = 500               # 所有分类加起来
@@ -230,6 +230,9 @@ def save(user_id: int, data: dict) -> int:
     # 开着 Cookie 代理的卡片。存完之后除了这些，别的罐子一律收掉（见 cookiejar.retain）
     with_jar = {str(i.get('id') or '') for g in groups
                 for i in (g.get('items') or []) if i.get('cookieJar')}
+    # 开着「单点登录」的卡片。它们登记的 IdP 客户端才算数（见 idp.sync）
+    with_sso = {str(i.get('id') or '') for g in groups
+                for i in (g.get('items') or []) if i.get('sso')}
     with db.cursor(write=True) as cur:
         # 先落 prefs：`updated_at` 是 ON UPDATE CURRENT_TIMESTAMP，但值没变的
         # UPDATE 不会触发它，所以显式写一次时间，不然只动卡片时这个戳不走
@@ -276,6 +279,7 @@ def save(user_id: int, data: dict) -> int:
 
         # 同一个事务里收掉「卡片删了」和「开关关了」留下的登录数据
         cookiejar.retain(cur, user_id, with_jar)
+        idp.sync(cur, user_id, with_sso)
 
     _revision[user_id] = _revision.get(user_id, 0) + 1
     return int(time.time())

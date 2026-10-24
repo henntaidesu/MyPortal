@@ -6,9 +6,17 @@ client_credentials / refresh_token：接进来的都是有后端的系统，用�
 
 ## 客户端从哪来
 
-`conf.json` 的 `idp.clients`，和 oidc 那段一样只在启动时读。不做页面上的注册：
-登记一个客户端等于把「以门户里任意一个人的身份登进那个系统」的钥匙交出去，
-这件事该由能改服务器文件的人来做，而不是任何一个管理员账号点一下。
+两处，撞了 client_id 以前者为准：
+
+- `conf.json` 的 `idp.clients`，和 oidc 那段一样只在启动时读。
+- **卡片编辑框里登记的**（`idp_clients` 表）：导航卡片上打开「单点登录」，管理员在同一个
+  框里填 client_id / client_secret / 回调地址。**只认管理员的卡片**——登记一个客户端
+  等于把「以门户里任意一个人的身份登进那个系统」的钥匙交出去，普通账号不该有这个能力；
+  所以查客户端时连着 users 表一起看，那个管理员被降级或停用，他登记的客户端当场失效。
+  卡片上的开关关掉只是 `enabled = 0`，密钥留着，再打开时对方系统不用重配。
+
+client_id 只许字母、数字、`_`、`-`：access_token 是拿 `.` 拼起来的，
+client_id 里带点会让 userinfo 拆不开 token。
 
 ## 票据都长什么样
 
@@ -31,13 +39,14 @@ import base64
 import hashlib
 import hmac
 import json
+import re
 import secrets
 import threading
 import time
 from typing import Optional
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
-from . import config, users
+from . import config, db, users
 from .auth import _lookup, _secret
 
 CODE_TTL = 60                # 授权码从发出到被换掉，正常是毫秒级的事
@@ -61,8 +70,124 @@ def _b64(raw: bytes) -> str:
 
 # ---------------------------------------------------------------- 客户端
 
+CLIENT_ID_RE = re.compile(r'^[A-Za-z0-9_-]{1,64}$')
+MIN_SECRET = 32
+MAX_URIS = 10
+
+
+def _row_to_client(row: dict) -> dict:
+    uris = db.loads(row.get('redirect_uris'))
+    return {'client_id': row['client_id'], 'client_secret': row['client_secret'],
+            'name': row['name'] or row['client_id'],
+            'redirect_uris': [str(u) for u in uris] if isinstance(uris, list) else []}
+
+
 def client(client_id: str) -> Optional[dict]:
-    return config.IDP_CLIENTS.get(client_id or '')
+    cid = client_id or ''
+    if cid in config.IDP_CLIENTS:
+        return config.IDP_CLIENTS[cid]
+    if not CLIENT_ID_RE.match(cid):
+        return None
+    with db.cursor() as cur:
+        # 登记人必须**现在**还是启用中的管理员，见模块头
+        cur.execute("SELECT c.client_id, c.client_secret, c.name, c.redirect_uris "
+                    "FROM idp_clients c JOIN users u ON u.id = c.owner_id "
+                    "WHERE c.client_id = %s AND c.enabled = 1 "
+                    "AND u.is_active = 1 AND u.role = 'admin'", (cid,))
+        row = cur.fetchone()
+    return _row_to_client(row) if row else None
+
+
+# ---------------------------------------------------------------- 卡片上登记的客户端
+
+def card_client(owner_id: int, item_id: str) -> Optional[dict]:
+    """卡片编辑框读回来用。**不带 client_secret**，只说配没配。"""
+    with db.cursor() as cur:
+        cur.execute('SELECT client_id, client_secret, name, redirect_uris, enabled '
+                    'FROM idp_clients WHERE owner_id = %s AND item_id = %s',
+                    (owner_id, item_id))
+        row = cur.fetchone()
+    if not row:
+        return None
+    out = _row_to_client(row)
+    return {'client_id': out['client_id'], 'redirect_uris': out['redirect_uris'],
+            'secret_set': bool(out['client_secret']), 'enabled': bool(row['enabled'])}
+
+
+def _clean_uris(raw: list) -> list[str]:
+    uris: list[str] = []
+    for item in raw or []:
+        uri = str(item or '').strip()
+        if not uri or uri in uris:
+            continue
+        parts = urlsplit(uri)
+        # 逐字比对的东西，这里只挡明显不对的：非 http(s)、没主机、带 #（RFC 6749 3.1.2 不许）
+        if parts.scheme not in ('http', 'https') or not parts.netloc or parts.fragment:
+            raise IdpError('invalid_request', f'回调地址不对：{uri}（要 http(s):// 开头、不带 #）')
+        uris.append(uri)
+    if not uris:
+        raise IdpError('invalid_request', '至少填一个回调地址')
+    if len(uris) > MAX_URIS:
+        raise IdpError('invalid_request', f'回调地址最多 {MAX_URIS} 个')
+    return uris
+
+
+def save_card_client(owner_id: int, item_id: str, *, client_id: str, name: str,
+                     redirect_uris: list, client_secret: str = '') -> dict:
+    """登记 / 改这张卡片的客户端。client_secret 留空 = 沿用已存的那串。
+
+    一张卡片一个客户端（`uk_idp_card`），改 client_id 就是把这一行换个主键。
+    """
+    cid = (client_id or '').strip()
+    if not CLIENT_ID_RE.match(cid):
+        raise IdpError('invalid_request', 'Client ID 只能用字母、数字、_ 和 -，最长 64 个字符')
+    if cid in config.IDP_CLIENTS:
+        raise IdpError('invalid_request', f'{cid} 已经登记在门户 conf.json 的 idp.clients 里了，换一个')
+    uris = _clean_uris(redirect_uris)
+    secret = (client_secret or '').strip()
+    if secret and len(secret) < MIN_SECRET:
+        raise IdpError('invalid_request', f'Client Secret 至少 {MIN_SECRET} 个字符（HS256 的密钥长度下限）')
+
+    with db.cursor(write=True) as cur:
+        cur.execute('SELECT client_secret FROM idp_clients WHERE owner_id = %s AND item_id = %s',
+                    (owner_id, item_id))
+        mine = cur.fetchone()
+        secret = secret or (mine or {}).get('client_secret') or ''
+        if not secret:
+            raise IdpError('invalid_request', '请先生成或填写 Client Secret')
+
+        cur.execute('SELECT owner_id, item_id FROM idp_clients WHERE client_id = %s', (cid,))
+        taken = cur.fetchone()
+        if taken and (int(taken['owner_id']), taken['item_id']) != (owner_id, item_id):
+            # 被别的卡片占着。那张卡片已经删了的话（行还在，见 sync 的说明）就收回来
+            cur.execute('SELECT name FROM nav_items WHERE user_id = %s AND client_id = %s',
+                        (taken['owner_id'], taken['item_id']))
+            alive = cur.fetchone()
+            if alive:
+                raise IdpError('invalid_request', f'Client ID {cid} 已经被卡片「{alive["name"]}」用了')
+            cur.execute('DELETE FROM idp_clients WHERE client_id = %s', (cid,))
+
+        cur.execute('DELETE FROM idp_clients WHERE owner_id = %s AND item_id = %s',
+                    (owner_id, item_id))
+        cur.execute('INSERT INTO idp_clients (client_id, client_secret, name, redirect_uris, '
+                    'owner_id, item_id, enabled) VALUES (%s, %s, %s, %s, %s, %s, 1)',
+                    (cid, secret, (name or cid)[:200], json.dumps(uris, ensure_ascii=False),
+                     owner_id, item_id))
+    return card_client(owner_id, item_id)
+
+
+def sync(cur, owner_id: int, with_sso: set) -> None:
+    """存导航时跟着卡片上的开关走：开着的 enabled = 1，关了或卡片删了的 enabled = 0。
+
+    **必须在存导航那个事务里调**（同 cookiejar.retain）。不删行：关掉再打开时密钥还在；
+    卡片删了的那行留着也无害（enabled = 0 不认），它的 client_id 会被下一个要用它的卡片收回。
+    """
+    if with_sso:
+        marks = ', '.join(['%s'] * len(with_sso))
+        cur.execute(f'UPDATE idp_clients SET enabled = (item_id IN ({marks})) '
+                    f'WHERE owner_id = %s', (*with_sso, owner_id))
+    else:
+        cur.execute('UPDATE idp_clients SET enabled = 0 WHERE owner_id = %s', (owner_id,))
 
 
 def check_redirect(cli: dict, redirect_uri: str) -> bool:
@@ -233,5 +358,11 @@ def redirect_with(uri: str, params: dict) -> str:
 def describe() -> str:
     if not config.IDP_ENABLED:
         return '没开'
-    names = '、'.join(c['name'] for c in config.IDP_CLIENTS.values()) or '一个客户端都没登记'
-    return f'开着（{names}），issuer={config.IDP_ISSUER or "按请求现拼"}'
+    names = [c['name'] for c in config.IDP_CLIENTS.values()]
+    try:
+        with db.cursor() as cur:
+            cur.execute('SELECT name FROM idp_clients WHERE enabled = 1')
+            names += [f'{r["name"]}（卡片）' for r in cur.fetchall()]
+    except Exception:
+        pass
+    return f'开着（{"、".join(names) or "一个客户端都没登记"}），issuer={config.IDP_ISSUER or "按请求现拼"}'

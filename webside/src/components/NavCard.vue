@@ -9,12 +9,20 @@ const emit = defineEmits(['edit', 'remove'])
 const host = computed(() => getHost(props.item.url))
 
 /* 开了门户代理就点去 /api/proxy/<id>，由后端转出去（见 app/proxy.py）。
-   原地址不显示在链接上了，但 title 里照样写着——不然鼠标停上去看不出这张卡片指着哪台机器 */
-const href = computed(() => (props.item.proxy ? proxyUrl(props.item) : props.item.url))
+   原地址不显示在链接上了，但 title 里照样写着——不然鼠标停上去看不出这张卡片指着哪台机器。
+   开了单点登录就点去那个系统的「门户登录」入口，回来时已经是登录状态；
+   关着（或入口没填）就照常打开，和以前一样 */
+const sso = computed(() => !!(props.item.sso && props.item.ssoLogin))
+const href = computed(() => {
+  if (sso.value) return props.item.ssoLogin
+  return props.item.proxy ? proxyUrl(props.item) : props.item.url
+})
 /* 两种代理模式点开的东西不一样，标签上分得开：出问题时先看这张卡片走的是哪一种 */
 const mode = computed(() => (props.item.proxy === 'site' ? '整站' : '代理'))
-const hint = computed(() =>
-  props.item.proxy ? `${props.item.url}（经门户代理·${mode.value}）` : props.item.url)
+const hint = computed(() => {
+  if (sso.value) return `${props.item.url}（经门户单点登录）`
+  return props.item.proxy ? `${props.item.url}（经门户代理·${mode.value}）` : props.item.url
+})
 </script>
 
 <template>
@@ -25,7 +33,8 @@ const hint = computed(() =>
         <span class="txt">{{ item.name }}</span>
         <!-- 走不走代理在页面上得看得出来：两者点开的地址不是一回事，出问题时
              第一件要确认的就是这个 -->
-        <span v-if="item.proxy" class="tag" :title="hint">{{ mode }}</span>
+        <span v-if="sso" class="tag" :title="hint">单点</span>
+        <span v-else-if="item.proxy" class="tag" :title="hint">{{ mode }}</span>
       </div>
       <div class="desc">{{ item.desc || host }}</div>
     </div>

@@ -6,14 +6,19 @@
     GET  /api/oidc/userinfo                   对方后端拿 access_token 问「这是谁」
     GET  /api/oidc/jwks                       HS256 用不上，给个空集合
 
-`idp.enabled` 关着时一律 404，和没有这几条路一样。
+    GET  /api/idp/cards/<卡片 id>             卡片编辑框：这张卡片登记的客户端（管理员）
+    PUT  /api/idp/cards/<卡片 id>             卡片编辑框：登记 / 修改（管理员）
+
+`idp.enabled` 关着时 oidc 那几条一律 404，和没有这几条路一样。卡片那两条不看它：
+先把客户端登记好、再去开 conf.json 是正常顺序，编辑框里会提示还没开。
 """
 import base64
 from html import escape
 from urllib.parse import parse_qs, quote, unquote
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from pydantic import BaseModel
 
 from .. import auth, config, idp
 
@@ -63,7 +68,8 @@ def authorize(request: Request, client_id: str = '', redirect_uri: str = '',
         return _error_page(f'门户里没有登记 client_id={client_id!r} 这个系统。')
     if not idp.check_redirect(cli, redirect_uri):
         return _error_page(f'回调地址 {redirect_uri} 没有登记在「{cli["name"]}」名下。'
-                           '请在门户 conf.json 的 idp.clients 里把它加进 redirect_uris。')
+                           '请在门户里编辑这张卡片，把它加进「单点登录 · 回调地址」'
+                           '（conf.json 里登记的客户端则加进 idp.clients 的 redirect_uris）。')
 
     def back(error: str, desc: str) -> RedirectResponse:
         return RedirectResponse(idp.redirect_with(redirect_uri, {
@@ -148,3 +154,39 @@ def userinfo(request: Request):
 def jwks():
     _enabled()
     return {'keys': []}
+
+
+# ---------------------------------------------------------------- 卡片编辑框
+
+class CardClientIn(BaseModel):
+    client_id: str
+    name: str = ''
+    redirect_uris: list[str] = []
+    client_secret: str = ''          # 留空 = 沿用已存的那串
+
+
+def _card_payload(request: Request, client: dict | None) -> dict:
+    return {
+        'idp_enabled': config.IDP_ENABLED,
+        # 对方系统里那栏「门户地址」要填的就是它，编辑框里照着显示出来让人抄
+        'issuer': _issuer(request),
+        'client': client,
+    }
+
+
+@router.get('/api/idp/cards/{item_id}')
+def get_card_client(item_id: str, request: Request, admin: dict = Depends(auth.require_admin)):
+    return _card_payload(request, idp.card_client(int(admin['id']), item_id[:64]))
+
+
+@router.put('/api/idp/cards/{item_id}')
+def put_card_client(item_id: str, body: CardClientIn, request: Request,
+                    admin: dict = Depends(auth.require_admin)):
+    try:
+        saved = idp.save_card_client(int(admin['id']), item_id[:64], client_id=body.client_id,
+                                     name=body.name, redirect_uris=body.redirect_uris,
+                                     client_secret=body.client_secret)
+    except idp.IdpError as exc:
+        raise HTTPException(400, str(exc)) from None
+    print(f'[单点登录] {admin["username"]} 在卡片上登记了客户端 {saved["client_id"]}')
+    return _card_payload(request, saved)
