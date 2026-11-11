@@ -73,13 +73,14 @@ export function takeOverKey(oldKey, newKey) {
  * DL 媒体库的 /api/sso/），base 告诉对方「回调地址拼在哪个前缀上」。
  * 推不出来（不是 /callback 结尾）就返回空串，由人在编辑框里自己填。
  *
- * 经门户代理打开的系统 base 在代理底下，这里推不出那一层，那种要手填。
+ * 已接入系统按完整 SSO 路径剥掉后缀，保留代理或子目录前缀。
  */
 export function ssoLoginFrom(callback) {
   try {
     const u = new URL((callback || '').trim())
     if (!/\/callback$/.test(u.pathname)) return ''
-    const base = u.origin + '/'
+    const callbackPath = /\/(?:mercariV2\/src\/use_web\/sso|api\/sso)\/callback$/
+    const base = u.origin + (callbackPath.test(u.pathname) ? u.pathname.replace(callbackPath, '/') : '/')
     return u.origin + u.pathname.replace(/\/callback$/, '/login') + '?base=' + encodeURIComponent(base)
   } catch {
     return ''

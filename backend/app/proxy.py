@@ -255,7 +255,7 @@ def _target(user_id: int, item_id: str) -> Target:
     return target
 
 
-def _rewriter(target: Target, foreign: str = '') -> Rewriter:
+def _rewriter(target: Target, foreign: str = '', portal_origin: str = '') -> Rewriter:
     """`foreign` 是白名单之外、从链接点过来的那台主机（见 `_upstream`）。
 
     这时候页面在它那边，它自己那一族域名上的资源也该跟着走代理，
@@ -266,7 +266,7 @@ def _rewriter(target: Target, foreign: str = '') -> Rewriter:
         name = foreign.lower().split(':', 1)[0]
         allow = tuple(sorted({*allow, name, proxyrewrite.site_of(name)}))
     return Rewriter(target.mount, allow, webside.browser_js(target.module),
-                    webside.rewrite_js(target.module))
+                    webside.rewrite_js(target.module), portal_origin=portal_origin)
 
 
 # ---------------------------------------------------------------- 白名单之外：只许公网
@@ -407,7 +407,7 @@ def _real_url(target: Target, value: str) -> str:
     return out
 
 
-def _clean_query(query: str, rewriter: Rewriter) -> str:
+def _clean_query(query: str, rewriter: Rewriter, *, keep_public_base: bool = False) -> str:
     """查询串里凡是指回门户的地址，换成上游的真实地址。
 
     登录那一步的常见写法是 `login?.done=<当前页面地址>`，页面脚本拿
@@ -422,6 +422,11 @@ def _clean_query(query: str, rewriter: Rewriter) -> str:
     out = []
     for piece in query.split('&'):
         key, sep, value = piece.partition('=')
+        # OIDC 客户端用 base 拼浏览器回调，必须保留公网代理前缀。
+        # 仅 SSO 登录入口保留这一项，普通站点的返回地址仍按原规则反解。
+        if keep_public_base and unquote(key) == 'base':
+            out.append(piece)
+            continue
         decoded = unquote(value)
         real = rewriter.unproxy(decoded)
         out.append(key + sep + (quote(real, safe='') if real != decoded else value))
@@ -775,14 +780,14 @@ async def forward(item_id: str, path: str, request: Request,
     scheme, host, rest, foreign = _upstream(target, request.scope)
     if foreign:
         await _check_foreign(host)
-    rewriter = _rewriter(target, host if foreign else '') if target.site else None
+    rewriter = _rewriter(target, host if foreign else '', _origin_of(str(request.url))) if target.site else None
 
     url = f'{scheme}://{host}/{rest}'
+    up_path = '/' + rest.split('?', 1)[0]
     query = request.url.query
     if query:
-        url += '?' + (_clean_query(query, rewriter) if rewriter else query)
-
-    up_path = '/' + rest.split('?', 1)[0]
+        sso_login = up_path in ('/mercariV2/src/use_web/sso/login', '/api/sso/login')
+        url += '?' + (_clean_query(query, rewriter, keep_public_base=sso_login) if rewriter else query)
     ctx = webside.Ctx(item_id, target.mount, target.base, scheme, host,
                       up_path, request.method)
     headers = _request_headers(request, target, scheme, host, rewriter,

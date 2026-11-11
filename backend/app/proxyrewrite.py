@@ -40,6 +40,7 @@
 """
 import codecs
 import re
+from urllib.parse import urlsplit
 
 from . import proxyhook
 
@@ -214,10 +215,11 @@ _META_CHARSET = re.compile(r'<meta\s[^>]*charset\s*=[^>]*>', re.I)
 class Rewriter:
     """一张卡片一套改写规则。`mount` 是 `/api/proxy/<卡片 id>/`。"""
 
-    __slots__ = ('mount', 'base', 'allow', 'extra_js', 'rewrite_code', '_proxied')
+    __slots__ = ('mount', 'base', 'allow', 'extra_js', 'rewrite_code', '_proxied', 'portal_origin')
 
     def __init__(self, mount: str, allow: tuple[str, ...], extra_js: str = '',
-                 rewrite_code: bool = True):
+                 rewrite_code: bool = True, *, portal_origin: str = ''):
+        self.portal_origin = portal_origin.rstrip('/')
         self.mount = mount
         self.base = f'{mount}{MARK}/'
         self.allow = allow
@@ -242,6 +244,18 @@ class Rewriter:
         value = (raw or '').strip()
         if not value:
             return raw
+        # 门户自己的授权端点必须由浏览器直达，才能带上门户会话；
+        # 已是本卡片的公网代理地址也不能再套一层代理。仅匹配当前门户 origin。
+        if self.portal_origin:
+            parts = urlsplit(value)
+            origin = f'{parts.scheme}://{parts.netloc}' if parts.netloc else ''
+            own_origin = (not parts.netloc and value.startswith('/') and not value.startswith('//')
+                          or origin == self.portal_origin
+                          or value.startswith('//') and parts.netloc == urlsplit(self.portal_origin).netloc)
+            if own_origin and (parts.path.startswith(self.mount)
+                               or parts.path.startswith('/api/oidc/')
+                               or parts.path == '/.well-known/openid-configuration'):
+                return raw
         if value.startswith(self.mount):
             return raw                                  # 已经在代理底下了
         if value.startswith('//'):
