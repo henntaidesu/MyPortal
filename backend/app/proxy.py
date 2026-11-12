@@ -78,7 +78,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, WebSoc
 from fastapi.responses import RedirectResponse, StreamingResponse
 from starlette.background import BackgroundTask
 
-from . import cookiejar, navstore, proxy_webside as webside, proxyrewrite, secretbox
+from . import diagnostics, cookiejar, navstore, proxy_webside as webside, proxyrewrite, secretbox
 from .auth import COOKIE_NAME, client_ip, require_login, user_from_token
 from .config import COOKIE_SECURE
 from .proxyrewrite import MARK, Rewriter
@@ -707,7 +707,10 @@ def _response_headers(resp: httpx.Response, target: Target, scheme: str, host: s
         if low == 'set-cookie':
             value = _rewrite_cookie(value, target.mount)
         elif low == 'location':
+            original = value
             value = _rewrite_location(value, target, scheme, host, rewriter)
+            diagnostics.event('redirect.rewrite', before=diagnostics.safe_url(original),
+                              after=diagnostics.safe_url(value), changed=value != original)
         elif low == 'link' and rewriter is not None:
             value = rewriter.link_header(value, scheme, host)
         out.append((raw_name, value.encode('latin-1')))
@@ -776,6 +779,7 @@ def enter(item_id: str, user: dict = Depends(require_login)):
 @router.api_route('/{item_id}/{path:path}', methods=_METHODS)
 async def forward(item_id: str, path: str, request: Request,
                   user: dict = Depends(require_login)):
+    diagnostics.event('proxy.resolve', card=item_id)
     target = _target(int(user['id']), item_id)
     scheme, host, rest, foreign = _upstream(target, request.scope)
     if foreign:
@@ -805,8 +809,13 @@ async def forward(item_id: str, path: str, request: Request,
         content=request.stream() if has_body else None,
     )
     try:
+        diagnostics.event('upstream.begin', url=diagnostics.safe_url(url), site=target.site, foreign=foreign)
         resp = await client.send(upstream, stream=True)
+        diagnostics.event('upstream.response', status=resp.status_code,
+                          location=diagnostics.safe_url(resp.headers.get('location', '')),
+                          content_type=resp.headers.get('content-type', '')[:100])
     except httpx.HTTPError as exc:
+        diagnostics.event('upstream.error', error_type=type(exc).__name__)
         raise HTTPException(502, f'门户连不上 {scheme}://{host}：{exc}') from None
 
     # 存罐子挂在这一句：底下有「改写后整份发」和「流式转」两条出路，

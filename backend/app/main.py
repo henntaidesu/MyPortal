@@ -18,8 +18,8 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import cookiejar, db, iconcache, idp, navstore, oidc, proxy, users
-from .config import CONF_PATH, DIST_DIR, HOST, PORT, uses_default_password
+from . import diagnostics, cookiejar, db, iconcache, idp, navstore, oidc, proxy, users
+from .config import BASE_DIR, CONF_PATH, DIST_DIR, HOST, PORT, uses_default_password
 from .icon import router as icon_router
 from .proxy import router as proxy_router
 from .routers.account import router as account_router
@@ -48,6 +48,7 @@ async def _purge_loop() -> None:
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # 数据库要第一个起来：后面每一句都要用它，连不上就 SystemExit，
     # 带着一个连不上的库把服务起起来只会让每个接口都 500
+    diagnostics.configure(BASE_DIR)
     db.init()
     first = users.ensure_bootstrap()
     if first is not None:
@@ -90,6 +91,8 @@ app = FastAPI(title='Portal', version='3.0.0', lifespan=lifespan)
 # 被代理页面里的根绝对地址（/static/x.js）靠它转回 /api/proxy/<id>/ 底下，
 # 见 app/proxy.py 末尾。中间件比路由先跑，所以这行放哪儿都行，放在这里只是挨着路由
 app.add_middleware(proxy.Fallback)
+# Outermost: record arrival even when auth, fallback, or routing fails.
+app.add_middleware(diagnostics.RequestDiagnostics)
 
 app.include_router(auth_router)
 app.include_router(idp_router)

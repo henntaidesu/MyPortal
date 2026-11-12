@@ -168,8 +168,12 @@ def charset_of(content_type: str, default: str = 'utf-8') -> str | None:
 # **主机名里必须带点**：不带点的话，JS 源码里的 `// 这是注释` 会被当成协议相对地址，
 # 后面那个词恰好在白名单里就被改坏了。代价是 `http://nas/` 这种单标签的内网名字
 # 在正文里改不着（根绝对和相对地址不受影响，照常能用）。
+# **协议名必须限长**：写成 `*` 的话，每个起点都会顺着一整段字母数字扫到头才失败，
+# 碰上 base64（vite 开发服务器给每个模块都内联一份 sourcemap，动辄几百 KB 一整段）
+# 就是平方级——vue 那一个文件改写要 80 秒，而且是在事件循环里同步跑，
+# 整个门户跟着卡死，表现成「页面一直转圈」。真实协议名没有超过 32 个字符的。
 _ABS = re.compile(r"""
-    (?P<scheme>[A-Za-z][A-Za-z0-9+.\-]*:)?       # 协议，可以没有（协议相对地址）
+    (?P<scheme>[A-Za-z][A-Za-z0-9+.\-]{0,31}:)?  # 协议，可以没有（协议相对地址）
     (?P<slash>\\?/\\?/)                          # // 或者 \/\/
     (?P<host>(?:[A-Za-z0-9][A-Za-z0-9.\-]*\.[A-Za-z]{2,}
               |\d{1,3}(?:\.\d{1,3}){3})           # 内网页面里指向另一台机器的 IP 地址
@@ -245,13 +249,18 @@ class Rewriter:
         if not value:
             return raw
         # 门户自己的授权端点必须由浏览器直达，才能带上门户会话；
-        # 已是本卡片的公网代理地址也不能再套一层代理。仅匹配当前门户 origin。
+        # 已是本卡片的公网代理地址也不能再套一层代理。只认当前门户主机及端口。
         if self.portal_origin:
             parts = urlsplit(value)
-            origin = f'{parts.scheme}://{parts.netloc}' if parts.netloc else ''
+            portal = urlsplit(self.portal_origin)
+            # Cloudflare/nginx 可能在前一跳终止 TLS，ASGI 看到 http；
+            # 同一 authority 的公网 https 仍是门户。仅允许这种升级，
+            # 不信任调用方传来的 forwarded 头，也不放行其他主机/端口。
+            own_authority = (parts.netloc == portal.netloc
+                             and (parts.scheme in ('', portal.scheme)
+                                  or portal.scheme == 'http' and parts.scheme == 'https'))
             own_origin = (not parts.netloc and value.startswith('/') and not value.startswith('//')
-                          or origin == self.portal_origin
-                          or value.startswith('//') and parts.netloc == urlsplit(self.portal_origin).netloc)
+                          or own_authority)
             if own_origin and (parts.path.startswith(self.mount)
                                or parts.path.startswith('/api/oidc/')
                                or parts.path == '/.well-known/openid-configuration'):

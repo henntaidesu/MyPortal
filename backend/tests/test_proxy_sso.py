@@ -89,5 +89,16 @@ class ProxySsoTests(unittest.TestCase):
         for url in ['https://other.example.com/api/oidc/authorize', PORTAL + '/other-page', 'https://other.example.com' + target.mount + 'page']:
             self.assertTrue(proxy._rewrite_location(url, target, target.scheme, target.host, rewriter).startswith(target.base))
 
+
+    def test_https_redirects_when_tls_terminates_before_portal(self):
+        target = proxy._to_target({'id': '6dk0sx3ezp', 'url': 'http://10.0.10.30:9600', 'proxy': 'site'})
+        # TLS ends at the reverse proxy; ASGI sees http with the public Host.
+        rewriter = proxy._rewriter(target, portal_origin='http://portal.makurochan.com')
+        for location in [PORTAL + '/api/oidc/authorize?state=123', ROOT + '#/login?sso_ticket=one-use']:
+            with self.subTest(location=location):
+                self.assertEqual(proxy._rewrite_location(location, target, target.scheme, target.host, rewriter), location)
+        for location in ['https://portal.makurochan.com:9443/api/oidc/authorize', 'https://other.example.com/api/oidc/authorize']:
+            self.assertTrue(proxy._rewrite_location(location, target, target.scheme, target.host, rewriter).startswith(target.base))
+
 if __name__ == '__main__':
     unittest.main()
