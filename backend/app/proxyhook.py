@@ -11,6 +11,8 @@ app/proxyrewrite.py 改的是**正文里写死的地址**，覆盖不到这几�
 白名单之外的地址**原样放行**（照旧直连），和后端那道是同一条规矩。
 例外是「点过去的页面」（`<a>` / `<form>` 的地址、`window.open`，走 `toNav`）：
 那几处白名单外的也折进代理，由后端在请求那一刻查是不是公网地址再决定转不转。
+`<a>` / `<form>` 只在**已经挂进文档**时才这么办：没挂进去的 `<a>` 多半是脚本拿来解析地址的，
+见 `navIfAttached`。
 
 ## 有意做成这样
 
@@ -318,12 +320,21 @@ _JS = r"""
         enumerable: d.enumerable,
         get: d.get,
         set: function (v) {
-          try { v = conv(v); } catch (e) {}
+          try { v = conv.call(this, v); } catch (e) {}
           d.set.call(this, v);
         }
       });
     } catch (e) {}
   }
+
+  /* 会换页的那几种标签：它们身上的地址按「点过去的页面」办（toNav）——
+     **只限已经挂进文档的**。没挂进去的 <a> 多半是拿来解析地址的：
+     `a = createElement('a'); a.href = url; 读 a.hostname / a.href`，gtag 这类统计广告脚本都这么写。
+     按 toNav 折进代理的话它读回来的就是门户地址，接着拿这条去发请求，第三方统计广告
+     就全绕到门户上来了（门户那台机器的 DNS 拦广告时就是一串 502）。
+     没挂进去的按 toProxy 办（只认白名单）；挂进文档时 MutationObserver 会再按 toNav 过一遍，
+     没挂进去就直接 click() 的由下面 fixTarget 那段兜 */
+  function navIfAttached(v) { return this && this.isConnected ? toNav(v) : toProxy(v); }
 
   [['HTMLScriptElement', 'src'], ['HTMLImageElement', 'src'], ['HTMLLinkElement', 'href'],
    ['HTMLIFrameElement', 'src'], ['HTMLSourceElement', 'src'], ['HTMLMediaElement', 'src'],
@@ -331,12 +342,12 @@ _JS = r"""
    ['HTMLTrackElement', 'src']].forEach(function (p) { patchProp(p[0], p[1], toProxy); });
   [['HTMLAnchorElement', 'href'], ['HTMLAreaElement', 'href'],
    ['HTMLFormElement', 'action'], ['HTMLInputElement', 'formAction'],
-   ['HTMLButtonElement', 'formAction']].forEach(function (p) { patchProp(p[0], p[1], toNav); });
+   ['HTMLButtonElement', 'formAction']].forEach(function (p) { patchProp(p[0], p[1], navIfAttached); });
 
-  /* 会换页的那几种标签：它们身上的地址按「点过去的页面」办（toNav） */
   var NAVTAGS = { A: 1, AREA: 1, FORM: 1, BUTTON: 1, INPUT: 1 };
   function convFor(el, attr) {
-    return el && NAVTAGS[el.tagName] && (attr === 'href' || attr === 'action' || attr === 'formaction')
+    return el && NAVTAGS[el.tagName] && el.isConnected
+      && (attr === 'href' || attr === 'action' || attr === 'formaction')
       ? toNav : toProxy;
   }
   [['HTMLImageElement', 'srcset'], ['HTMLSourceElement', 'srcset']]
@@ -408,6 +419,15 @@ _JS = r"""
       }
     }
   }
+  /* 没挂进文档的 <a> 直接 click()（下载、跳新页常这么写）：点击事件传不到 document，
+     上面那个捕获阶段的监听收不到，在这儿补那一下 */
+  wrap(HTMLAnchorElement.prototype, 'click', function (orig) {
+    return function () {
+      try { if (!this.isConnected) fixTarget(this); } catch (e) {}
+      return orig.apply(this, arguments);
+    };
+  });
+
   try {
     document.addEventListener('click', function (ev) { try { fixTarget(ev.target); } catch (e) {} }, true);
     document.addEventListener('auxclick', function (ev) { try { fixTarget(ev.target); } catch (e) {} }, true);

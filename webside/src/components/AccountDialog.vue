@@ -9,6 +9,7 @@
 import { ref, reactive, onMounted, onBeforeUnmount } from 'vue'
 import { api, ApiError } from '../api'
 import { auth } from '../auth'
+import { askConfirm } from '../ask'
 
 const emit = defineEmits(['close'])
 
@@ -70,7 +71,13 @@ async function changePassword() {
 }
 
 async function logoutAll() {
-  if (!confirm('把所有设备上的登录都踢掉？包括现在这台，你会被退回登录页。')) return
+  const yes = await askConfirm({
+    title: '踢掉所有设备',
+    message: '把所有设备上的登录都踢掉？包括现在这台，你会被退回登录页。',
+    ok: '全部踢掉',
+    danger: true
+  })
+  if (!yes) return
   try {
     await api('/api/account/logout-all', { method: 'POST' })
   } finally {

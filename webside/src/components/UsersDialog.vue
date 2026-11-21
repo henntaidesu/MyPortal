@@ -12,6 +12,7 @@
 import { ref, reactive, onMounted, onBeforeUnmount } from 'vue'
 import { api, ApiError } from '../api'
 import { auth } from '../auth'
+import { askConfirm, askText } from '../ask'
 
 const emit = defineEmits(['close'])
 
@@ -76,8 +77,15 @@ function toggleActive(u) {
       `${u.username} 已${u.is_active ? '停用' : '启用'}`)
 }
 
-function resetPassword(u) {
-  const pw = prompt(`给「${u.username}」设一个新密码（至少 6 位，留空=取消本地密码，只能走单点登录）`)
+async function resetPassword(u) {
+  const pw = await askText({
+    title: `重置「${u.username}」的密码`,
+    message: '至少 6 位。留空 = 取消本地密码，以后只能走单点登录。\n'
+      + '重置后对方所有设备上的登录都会失效。',
+    label: '新密码',
+    type: 'password',
+    ok: '重置'
+  })
   if (pw === null) return
   run(() => api(`/api/users/${u.id}/password`, { method: 'PUT', body: { password: pw || null } }),
       `${u.username} 的密码已重置，他所有设备上的登录都失效了`)
@@ -88,8 +96,14 @@ function kick(u) {
       `${u.username} 已被踢下线`)
 }
 
-function remove(u) {
-  if (!confirm(`删除「${u.username}」？他名下 ${u.items} 个导航会一起删掉，删了就没了。`)) return
+async function remove(u) {
+  const yes = await askConfirm({
+    title: '删除用户',
+    message: `删除「${u.username}」？名下 ${u.items} 个导航会一起删掉，删了就没了。`,
+    ok: '删除',
+    danger: true
+  })
+  if (!yes) return
   run(() => api(`/api/users/${u.id}`, { method: 'DELETE' }), `${u.username} 已删除`)
 }
 

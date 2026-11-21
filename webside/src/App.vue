@@ -7,10 +7,11 @@ import LoginView from './components/LoginView.vue'
 import AccountDialog from './components/AccountDialog.vue'
 import UsersDialog from './components/UsersDialog.vue'
 import SsoDialog from './components/SsoDialog.vue'
-import ImportDialog from './components/ImportDialog.vue'
+import AskDialog from './components/AskDialog.vue'
 import { state, removeItem, addGroup, removeGroup, boot, unbind } from './store'
 import { end as endDrag } from './drag'
 import { auth, refresh, logout } from './auth'
+import { askConfirm, askText } from './ask'
 import { colorOf } from './utils'
 
 const dialog = ref(null)   // { group, item } | null，item 为 null 表示新增
@@ -23,7 +24,7 @@ const dialog = ref(null)   // { group, item } | null，item 为 null 表示新�
  * 一个人的门户不需要「我是谁」，多个人的必须有——不然同一台电脑上换了个人登，
  * 看着一模一样的页面，改了半天才发现改的是别人的那份。
  */
-const panel = ref('')      // '' | 'account' | 'users' | 'import' | 'sso'
+const panel = ref('')      // '' | 'account' | 'users' | 'sso'
 const menu = ref(false)
 
 const name = computed(() => auth.user?.display_name || auth.user?.username || '')
@@ -41,20 +42,24 @@ function openPanel(p) {
   menu.value = false
 }
 
-function askRemoveItem({ group, item }) {
-  if (confirm('删除「' + item.name + '」？')) removeItem(group.id, item.id)
+async function askRemoveItem({ group, item }) {
+  const yes = await askConfirm({
+    title: '删除导航', message: `删除「${item.name}」？`, ok: '删除', danger: true
+  })
+  if (yes) removeItem(group.id, item.id)
 }
 
-function askRemoveGroup(group) {
+async function askRemoveGroup(group) {
   const n = group.items.length
-  const tip = n
+  const message = n
     ? `删除分类「${group.name}」？里面 ${n} 个导航会一起删掉。`
     : `删除分类「${group.name}」？`
-  if (confirm(tip)) removeGroup(group.id)
+  const yes = await askConfirm({ title: '删除分类', message, ok: '删除', danger: true })
+  if (yes) removeGroup(group.id)
 }
 
-function newGroup() {
-  const name = prompt('新分类叫什么？', '新分类')
+async function newGroup() {
+  const name = await askText({ title: '新建分类', label: '分类名', value: '新分类', ok: '新建' })
   if (name !== null) addGroup(name)
 }
 
@@ -131,10 +136,6 @@ function onPageDrop() {
 
           <div class="sep"></div>
 
-          <button @click="openPanel('import')">
-            <svg class="mi" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12" /><path d="m7 10 5 5 5-5" /><path d="M5 21h14" /></svg>
-            导入导航
-          </button>
           <button @click="openPanel('account')">
             <svg class="mi" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4" /><path d="M4 21a8 8 0 0 1 16 0" /></svg>
             账号
@@ -185,11 +186,13 @@ function onPageDrop() {
       @close="dialog = null"
     />
 
-    <ImportDialog v-if="panel === 'import'" @close="panel = ''" />
     <AccountDialog v-if="panel === 'account'" @close="panel = ''" />
     <UsersDialog v-if="panel === 'users'" @close="panel = ''" />
     <SsoDialog v-if="panel === 'sso'" @close="panel = ''" />
   </div>
+
+  <!-- 页面内的确认框 / 输入框（ask.js），替掉浏览器自带的 confirm() / prompt() -->
+  <AskDialog />
 </template>
 
 <style scoped>

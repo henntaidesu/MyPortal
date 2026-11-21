@@ -158,6 +158,62 @@ try:
 except Exception:                                     # noqa: BLE001  httpx 内部结构变了
     _ACCEPT_ENCODING = 'gzip, deflate'
 
+# 解 br 时每次最多要这么多输出，见 `_patch_brotli`
+_BR_STEP = 64 * 1024
+
+
+def _patch_brotli() -> None:
+    """绕开 brotlicffi 1.2.0.0 / 1.2.0.1 边收边解 br 时的一个 bug。
+
+    表现：整站代理 メルカリ 时 mercdn.net 上的 CSS/JS 一律 500，日志里是
+    `httpx.DecodingError: brotli: decoder process called with data when
+    'can_accept_more_data()' is False`。数据没坏，整份一次解开是好的。
+
+    毛病在它的 `Decompressor._decompress`：一次调用里输出缓冲（按输入的 5 倍给）
+    不够、要转第二圈时，第一圈没吃完的输入被存进 `_unconsumed_data`；第二圈把输入
+    吃完了它却不清，下一块数据进来，开头那句检查看它非空就抛。所以只有**某一块的
+    压缩比超过 5 倍**才炸（CSS 很容易），而 httpx 正是边收边解的。1.2.0.2 修掉了。
+
+    不靠「升级一下」：它不是门户的直接依赖，httpx 见到环境里有就用，conda 的 base
+    环境里它是顺带装的，打 exe 时环境里是哪一版就打进去哪一版。所以在这儿绕——
+    换成 1.2 新加的 `output_buffer_limit`：每次最多要那么多，缓冲一满就返回，
+    一次调用只转一圈，没吃完的输入下一次开头就被取走，留不成陈货。
+    吐出来的顶到上限 = 后面还有，喂空串接着要，直到有一次不满上限为止。
+
+    **别改成拿 `can_accept_more_data()` 判断吐没吐完**：Google 的 C 版 `brotli`
+    （httpx 有它就优先用它）把输入整个收进内部缓冲，那个方法的意思只是
+    「可以再喂输入了」，它说 True 的时候输出可能还剩一大截，照它停就丢数据。
+    没有这套接口的老版本（也没这个 bug）照旧走 httpx 自己那条。
+
+    改的是 httpx 进程级的那张解码表，icon.py 抓图标那条也一并用上。
+    """
+    try:
+        from httpx import _decoders
+        base = _decoders.SUPPORTED_DECODERS['br']
+    except Exception:                                 # noqa: BLE001  没装 brotli，或者 httpx 内部结构变了
+        return
+
+    class Brotli(base):
+        def decode(self, data: bytes) -> bytes:
+            # 有 can_accept_more_data 就是 1.2 那套（同一版加的 output_buffer_limit），只拿它认版本
+            if not data or not hasattr(self.decompressor, 'can_accept_more_data'):
+                return super().decode(data)
+            self.seen_data = True
+            try:
+                piece = self._decompress(data, output_buffer_limit=_BR_STEP)
+                out = [piece]
+                while len(piece) >= _BR_STEP:         # 顶到上限了，后面还有
+                    piece = self._decompress(b'', output_buffer_limit=_BR_STEP)
+                    out.append(piece)
+            except _decoders.brotli.error as exc:
+                raise httpx.DecodingError(str(exc)) from exc
+            return b''.join(out)
+
+    _decoders.SUPPORTED_DECODERS['br'] = Brotli
+
+
+_patch_brotli()
+
 
 # ---------------------------------------------------------------- 目标地址
 
@@ -831,7 +887,14 @@ async def forward(item_id: str, path: str, request: Request,
     _save_cookies(resp, target, int(user['id']), host, up_path)
 
     if rewriter is not None and request.method != 'HEAD' and resp.status_code not in (204, 304):
-        rewritten = await _rewritten(resp, target, ctx, rewriter, scheme, host)
+        try:
+            rewritten = await _rewritten(resp, target, ctx, rewriter, scheme, host)
+        except httpx.HTTPError as exc:
+            # 正文读到一半断了、或者压缩数据解不开。响应头还没发，回一个干净的 502，
+            # 别让它变成一屏 500 的 traceback
+            await resp.aclose()
+            diagnostics.event('upstream.error', error_type=type(exc).__name__)
+            raise HTTPException(502, f'{scheme}://{host} 回来的正文读不下来：{exc}') from None
         if rewritten is not None:
             return rewritten
 

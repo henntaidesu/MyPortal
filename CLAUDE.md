@@ -205,6 +205,8 @@ conf.json 的 `idp.clients`（启动时读），和**卡片编辑框里登记的
 - **授权码存在进程内字典里，60 秒、一次性**——全仓库唯一一处服务端存票，因为签名串做不到一次性。
 - **access_token 带 token_version**，改口令 / 停用 / 踢下线后 userinfo 当场不认。
 - **id_token 用各客户端自己的 client_secret 做 HS256**，不上 RS256（要密钥对和 jwks，还会把 cryptography 变成必需）。
+- **id_token 的 `iat` / `auth_time` 往前拨 5 分钟**（`idp.CLOCK_SKEW`，`exp` 照真实时间算）：对方系统多半用 PyJWT，
+  默认 leeway=0，时钟比门户慢一秒就报 `The token is not yet valid (iat)`，单点登录次次失败、账号口令登录却正常。
 - **redirect_uri 逐字比对，不对时停在门户报错页、绝不跳回去**（开放重定向）。
 - **`proxy.Fallback` 放过 `/api/oidc/`**：经代理打开的系统跳来授权时带着代理页面的 Referer，
   不放过会被 307 回那个系统身上。授权端点在没登录时跳 `/?continue=...` 也带 `Referrer-Policy: no-referrer`，同理。
@@ -240,7 +242,8 @@ conf.json 的 `idp.clients`（启动时读），和**卡片编辑框里登记的
   免得把本机没同步的改动冲掉。
 - **界面仍然是被刻意削到只剩分类和卡片的**：标题栏、主题切换、搜索、**导出**、
   底部统计，都是按要求逐条去掉的，不是漏写的。加回去之前先问一声。
-  （导入是按要求加回来的，导出没有——要备份就备份那个库。）
+  （导入一度按要求加回来过，后来又按要求整个去掉了，连 `/api/nav/legacy` 一起；
+  导出从来没有——要备份就备份那个库。老 conf.json 里的 `nav` 只剩首启自动搬那一次。）
   **右上角那一小块是多用户绕不过去才加回来的**（当前登录的是谁、账号、用户管理、退出）：
   一个人的门户不需要「我是谁」，多个人的必须有，不然同一台电脑上换了个人登，
   看着一模一样的页面，改了半天才发现改的是别人那份。它是绝对定位的，
@@ -253,27 +256,15 @@ conf.json 的 `idp.clients`（启动时读），和**卡片编辑框里登记的
 - **`nav.title` 页面上不显示了，但照样读进来、照样写回去**：谁在 conf.json 里手写了
   一个标题，不该被下一次存导航悄悄抹掉。`state.theme` 同理（没有切换按钮了，
   但 `applyTheme` 照常跟着它走，默认 auto = 跟随系统）。
+- **不用浏览器自带的 `confirm()` / `prompt()` / `alert()`**，一律走
+  [ask.js](webside/src/ask.js) 的 `askConfirm` / `askText`（await，画面是 App.vue 挂的
+  [AskDialog.vue](webside/src/components/AskDialog.vue)）。自带那几个顶上压着一行
+  「xxx.com 显示」、样式跟门户对不上，输入框也设不成 password——这是按要求换掉的。
+  它常叠在别的弹窗上开，所以 z-index 高一档，Esc 在**捕获阶段**接住只关自己这一层：
+  底下那些弹窗都在 window 上听 Esc，不拦的话一按两层一起关。
 - **页面上没有任何「存失败了」的提示**：`sync.offline` 还在 store.js 里照常维护，
   但没有 UI 读它了。要加提示的话接这个字段，别另起一套。
 - **冲突是后写的盖先写的**，不做合并。自己给自己看的一页东西，为它做合并不值当。
-- **导入也只改 `state`，不另开一条跟后端说话的路**（`parseImport` / `importNav`，
-  [ImportDialog.vue](webside/src/components/ImportDialog.vue) 只管把文本递进来）。
-  改完 state 之后存盘走的还是那条自动保存——这是 store.js 那条边界的直接好处：
-  导入这个功能后端**一行都不用改**。
-  - 认的形状故意放得很松：整份 `conf.json`、只有 `nav` 那一段、只有 `groups` 或
-    `items`、甚至光一个数组。人手里那份 JSON 是从哪儿抠出来的说不准，
-    为形状不对而拒收只会让人回去自己拼一个外层壳子。
-  - **合并时撞了 id 要换一个新的**：不换的话拖拽、编辑会认错对象，而且 Cookie 罐子
-    钉在卡片 id 上（app/cookiejar.py），会串到另一张卡片去。
-  - **替换时反而要保留导入的 id**：这样「导出再导回来」能接上原来的罐子。
-  - `title` / `theme` 只在导入的数据里**真的写了**的时候才盖掉现有的，
-    和 `normalize()` 那条「别把人家手写的标题抹掉」是同一个道理。
-- **[`GET /api/nav/legacy`](backend/app/routers/nav.py) 要管理员，而且只读。**
-  它把 conf.json 里那段老导航原样交出去，给页面上的「从服务器导入」用。
-  要管理员不是只要登录：那一段是单账号时代那个人的导航，里面多半是内网地址
-  和后台入口。首启时它已经自动搬进第一个管理员名下了（`navstore.import_legacy`，
-  而且靠 `portal_meta` 里的标记**只搬一次**），这条接口是留给「搬的时候出了岔」
-  「换了一份 conf.json 想再导一次」这类情况的手动入口。
 - **卡片和分类里有哪些字段后端不管**（`navstore.clean` 只看标题、主题、条数和体积）。
   摊不进列的字段**原样进 `extra` 这个 JSON 列**，读出来再摊回卡片上——这是上一版
   「加字段只改 store.js」那条约定的延续。列写死的话，前端加一个字段就得改表结构、
@@ -322,8 +313,8 @@ conf.json 的 `idp.clients`（启动时读），和**卡片编辑框里登记的
 | 卡片上选 | `proxy` | 干什么 |
 | --- | --- | --- |
 | 关闭 | `false` | 直接连原地址 |
-| 开启 · 直接转发 | `true` | 只转卡片这一台机器，正文一个字不改。内网后台用它 |
-| 开启 · 整站 | `"site"` | 一张卡片转一整族域名，还改写页面里的地址。公网站点用它 |
+| 完整路径转发（直接转发） | `true` | 只转卡片这一台机器，正文一个字不改。内网后台用它 |
+| 门户代理访问（整站） | `"site"` | 一张卡片转一整族域名，还改写页面里的地址。公网站点用它 |
 
 内网后台多半自己用相对地址，直接转发就够，也最不容易出事。公网站点不行——
 メルカリ 的脚本在 `mercdn.net`、雅虎的图在 `yimg.jp`，页面里写的又都是完整地址，
@@ -346,6 +337,10 @@ conf.json 的 `idp.clients`（启动时读），和**卡片编辑框里登记的
   出口 IP 直连了。只有**会换页**的地址才往白名单外折：`<a>`/`<area>`/`<form>`/提交按钮
   的地址、`window.open`、`Location` 跳转（proxyrewrite 的 `_nav`、proxyhook 的 `toNav`）；
   `<script>`/`<img>`/`fetch` 这类子资源照旧只认白名单，第三方统计广告不必绕门户。
+  **注入脚本里 `<a>`/`<form>` 要已经挂进文档才按 `toNav` 办**（`navIfAttached`）：
+  gtag 这类脚本拿一个没挂进文档的 `<a>` 解析地址（`a.href = url` 再读回来），按 `toNav`
+  折的话它读回来的是门户地址，拿去发请求，广告统计就全绕到门户上了——门户那台机器的
+  DNS 拦广告时，日志里是一串 `googleads.g.doubleclick.net` 的 502（「门户解析不了」）。
   到了外站那一页，它自己的注册域会临时并进**这一次响应**的改写白名单（`_rewriter`
   的 `foreign`），卡片的白名单不变。挡不住 DNS rebinding，量级和下面「被代理页面能调
   `/api/nav`」那条一样。外站的 Cookie 和卡片那族站点共用 `/api/proxy/<id>/` 这一个路径，
@@ -433,6 +428,12 @@ conf.json 的 `idp.clients`（启动时读），和**卡片编辑框里登记的
   浏览器无所谓，但拿 `wget` 或者下载工具去拉一个 Release 附件的会说 `identity`，
   照直把 gzip 转回去，落到磁盘上就是一坨解不开的字节，而文件名和长度看着都对。
   认不了的走 `aiter_bytes` 当场解开（httpx 边收边解，一样是流式的）。
+- **httpx 解 br 用的解码器被换掉了**（proxy.py 的 `_patch_brotli`，改的是 httpx 进程级的解码表）。
+  brotlicffi 1.2.0.0 / 1.2.0.1 边收边解时，只要某一块压缩比超过 5 倍就抛
+  `can_accept_more_data() is False`，表现成メルカリ 的 CSS/JS 整片 500（`httpx.DecodingError`），
+  而同一份数据一次解开是好的。它不是直接依赖，是 conda base 环境里顺带装的，那一版恰好就是坏的，
+  打 exe 时原样打进去——所以在代码里绕，不靠升级。**别改成拿 `can_accept_more_data()` 判断吐没吐完**：
+  C 版 `brotli`（httpx 有它就优先用）那个方法的意思只是「能再喂输入了」，照它停会丢数据。
 - **响应头走 `resp.headers.raw` 不走 `.items()`**：`Set-Cookie` 一次可能好几条，
   字典形状只留得下最后一条。
 - **dev 下 vite 的 `/api` 代理要 `ws: true`**，否则带 web 终端、实时日志的页面

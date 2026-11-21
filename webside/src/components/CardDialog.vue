@@ -5,6 +5,7 @@ import HintTip from './HintTip.vue'
 import { state, addItem, updateItem } from '../store'
 import { api } from '../api'
 import { auth } from '../auth'
+import { askConfirm } from '../ask'
 import { getHost, normalizeUrl, ssoLoginFrom, uid } from '../utils'
 
 const props = defineProps({
@@ -150,7 +151,13 @@ async function loadJar() {
 }
 
 async function clearJar() {
-  if (!confirm('清除已保存的登录数据？下次打开这张卡片要重新登录一次。')) return
+  const yes = await askConfirm({
+    title: '清除登录数据',
+    message: '清除已保存的登录数据？下次打开这张卡片要重新登录一次。',
+    ok: '清除',
+    danger: true
+  })
+  if (!yes) return
   try {
     await api('/api/cookies/' + encodeURIComponent(props.item.id), { method: 'DELETE' })
     await loadJar()
@@ -255,8 +262,8 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
         <span class="lb">门户代理</span>
         <select v-model="form.proxy">
           <option :value="false">关闭</option>
-          <option :value="true">开启 · 直接转发（内网后台）</option>
-          <option value="site">开启 · 整站（公网站点）</option>
+          <option :value="true">完整路径转发</option>
+          <option value="site">门户代理访问</option>
         </select>
       </label>
 
@@ -278,7 +285,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
           </span>
           <select v-model="form.cookieJar">
             <option :value="false">关闭</option>
-            <option :value="true">开启 · 登录态存在服务器</option>
+            <option :value="true">开启</option>
           </select>
         </label>
       </template>
@@ -309,8 +316,8 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
           </HintTip>
         </span>
         <select v-model="form.sso">
-          <option :value="false">关闭 · 直接打开网页</option>
-          <option :value="true">开启 · 用门户账号登录</option>
+          <option :value="false">关闭</option>
+          <option :value="true">开启</option>
         </select>
       </label>
 

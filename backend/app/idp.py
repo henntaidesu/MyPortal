@@ -63,6 +63,11 @@ from .auth import _lookup, _secret
 
 CODE_TTL = 60                # 授权码从发出到被换掉，正常是毫秒级的事
 TOKEN_TTL = 3600             # access_token / id_token。对方拿完 userinfo 就建自己的会话了
+# id_token 的 iat / auth_time 往前拨这么多秒（Entra ID 也是这么做的，拨 5 分钟）。
+# 对方系统的时钟只要比门户慢一秒，PyJWT（默认 leeway=0）就报
+# 「The token is not yet valid (iat)」，表现成单点登录每次都失败、账号口令登录却好好的。
+# exp 仍按真实时间算，所以这一拨只放宽「签发时间在未来」那一条，不延长 token 的寿命。
+CLOCK_SKEW = 300
 
 _codes: dict[str, dict] = {}
 _codes_lock = threading.Lock()
@@ -370,9 +375,10 @@ def redeem(cli: dict, code: str, redirect_uri: str, verifier: str) -> dict:
         raise IdpError('invalid_grant', '这个账号已经不存在或被停用了')
 
     now = int(time.time())
+    issued = now - CLOCK_SKEW
     claims = {
         'iss': saved['issuer'], 'sub': str(int(user['id'])), 'aud': cli['client_id'],
-        'iat': now, 'exp': now + TOKEN_TTL, 'auth_time': now,
+        'iat': issued, 'exp': now + TOKEN_TTL, 'auth_time': issued,
         **profile(user),
     }
     if saved['nonce']:
