@@ -27,6 +27,13 @@ app/proxyrewrite.py 改的是**正文里写死的地址**，覆盖不到这几�
 - **`document.domain` 赋值吞掉**：雅虎那几个站的老脚本会写
   `document.domain = 'yahoo.co.jp'`，在门户这个域名下赋值直接抛 SecurityError，
   整个脚本就断在那儿了。
+- **`localStorage` / `sessionStorage` 换成带前缀的一层**（前缀是「门户用户 + 卡片」）：
+  被代理的页面全在门户这一个源底下，这两样是整个源共用一份的。不分开的话，
+  同一个浏览器里换个门户账号打开同一张（分享来的）卡片，页面读到的是上一个人存下的
+  登录 token，直接就以上一个人的身份进去了——二手系统（FreeMarket）就是这么串的号。
+  不同卡片之间也会互相读到、一句 `clear()` 把别人的（连门户自己的导航缓存）一起清掉。
+  只管这两样：IndexedDB / Cache Storage 没分开；`storage` 事件里的 key 带着前缀；
+  拿 `Storage.prototype.getItem.call(...)` 或者空白 iframe 绕过去的也拦不住。
 """
 import json
 
@@ -484,6 +491,77 @@ _JS = r"""
     }
   } catch (e) {}
 
+  /* ---------------- 本地存储：按「门户用户 + 卡片」分开（见模块头） ----------------
+     window 上那两个属性换成一个 Proxy：键前面加上 C.store 再去读写原生那份，
+     列键、length、clear() 都只算自己这个前缀底下的。原生那份里不带前缀的老数据
+     （改成这样之前存的）从此看不见，也不去动它——分不清是谁的 */
+  function scopedStorage(native, prefix) {
+    function keys() {
+      var out = [];
+      for (var i = 0; i < native.length; i++) {
+        var k = native.key(i);
+        if (k !== null && k.indexOf(prefix) === 0) out.push(k.slice(prefix.length));
+      }
+      return out;
+    }
+    function method(fn) { return { value: fn, writable: true, configurable: true }; }
+    /* 原型挂 Storage.prototype：`localStorage instanceof Storage` 照样成立。
+       方法都是 configurable 的，下面 ownKeys 只报存的那些键才不违反 Proxy 的约束 */
+    var api = Object.create(Storage.prototype, {
+      getItem: method(function (k) { return native.getItem(prefix + k); }),
+      setItem: method(function (k, v) { native.setItem(prefix + k, v); }),
+      removeItem: method(function (k) { native.removeItem(prefix + k); }),
+      clear: method(function () { keys().forEach(function (k) { native.removeItem(prefix + k); }); }),
+      key: method(function (i) { var ks = keys(); return ks[i] === undefined ? null : ks[i]; })
+    });
+    return new Proxy(api, {
+      get: function (t, k) {
+        if (k === 'length') return keys().length;
+        if (typeof k === 'symbol' || k in t) return t[k];
+        var v = native.getItem(prefix + k);          /* localStorage.foo 这种写法 */
+        return v === null ? undefined : v;
+      },
+      set: function (t, k, v) {
+        if (typeof k === 'symbol') t[k] = v;
+        else native.setItem(prefix + k, v);
+        return true;
+      },
+      has: function (t, k) {
+        return typeof k === 'symbol' || k in t ? k in t : native.getItem(prefix + k) !== null;
+      },
+      deleteProperty: function (t, k) {
+        if (typeof k !== 'symbol') native.removeItem(prefix + k);
+        return true;
+      },
+      ownKeys: function () { return keys(); },
+      getOwnPropertyDescriptor: function (t, k) {
+        if (typeof k === 'symbol') return undefined;
+        var v = native.getItem(prefix + k);
+        return v === null ? undefined : { value: v, writable: true, enumerable: true, configurable: true };
+      },
+      defineProperty: function (t, k, d) {
+        if (typeof k !== 'symbol' && 'value' in d) native.setItem(prefix + k, d.value);
+        return true;
+      }
+    });
+  }
+  if (C.store) {
+    ['localStorage', 'sessionStorage'].forEach(function (name) {
+      try {
+        /* Chrome / Firefox 里它们是 window 自己的访问器属性，可重定义 */
+        var owner = Object.prototype.hasOwnProperty.call(window, name) ? window : Window.prototype;
+        var d = Object.getOwnPropertyDescriptor(owner, name);
+        if (!d || !d.get || !d.configurable) return;
+        var native = d.get.call(window);              /* 存储被禁用时这一句会抛，那就不动它 */
+        if (!native) return;
+        var view = scopedStorage(native, C.store);
+        Object.defineProperty(window, name, {
+          configurable: true, enumerable: d.enumerable, get: function () { return view; }
+        });
+      } catch (e) {}
+    });
+  }
+
   /* Service Worker 会横在所有请求前面按它自己那套改地址，和这里打架；
      而且装上之后要进浏览器设置才卸得掉。直接让注册失败 */
   try {
@@ -501,8 +579,8 @@ _JS = r"""
 
 
 def script(base: str, mount: str, scheme: str, host: str,
-           allow: tuple[str, ...], extra_js: str = '') -> str:
-    """拼出要插进 `<head>` 的那个 `<script>`。
+           allow: tuple[str, ...], extra_js: str = '', *, store: str = '') -> str:
+    """拼出要插进 `<head>` 的那个 `<script>`。`store` 是本地存储的键前缀，空串 = 不分开。
 
     配置是 `json.dumps` 出来的，所以卡片名里有引号、主机名里有奇怪字符都不会把
     脚本拼断。`</` 要转义掉：正文里出现 `</script` 的话 HTML 解析器会就地把脚本
@@ -514,6 +592,7 @@ def script(base: str, mount: str, scheme: str, host: str,
         'scheme': scheme,    # 当前页面在上游那边的协议
         'host': host,        # 当前页面在上游那边的主机名
         'allow': list(allow),
+        'store': store,      # localStorage / sessionStorage 的键前缀，见模块头
     }, ensure_ascii=False)
     body = (_JS
             .replace('__PORTAL_CONFIG__', config)

@@ -46,6 +46,22 @@
 这里只有三个接点：`_cookie_out()`（请求侧，合并罐子和浏览器那两份）、
 `_save_cookies()`（响应侧）、以及 WebSocket 握手那一处。
 
+## 浏览器里的登录也按门户用户分开
+
+卡片分享出去之后，几个门户用户用的是**同一个**卡片 id、同一条 `/api/proxy/<id>/` 路径。
+同一个浏览器里换个门户账号打开它，浏览器照样把上一个人在上游的登录 Cookie 带过来，
+等于连登录一起分享了——而分享的本意只是配置。所以这条路径底下另种一枚 HttpOnly 的
+`portal_proxy_owner`（门户用户 id），见 `_cookie_owner` / `_owner_cookies`：
+对得上才把浏览器那份 Cookie 转给上游，对不上（或者没有）就一条都不转，
+顺手请浏览器把它们删掉、把标记换成现在这个人。localStorage 那一半在 app/proxyhook.py。
+
+「这个人」指的是 `Target.login`：通常就是登着门户的人；分享人给他勾了「共享登录」时
+是分享人。罐子、Cookie 标记、本地存储前缀三处都按它算，所以共享登录的人用的是分享人那份。
+
+还有浏览器缓存这一道：注入过脚本的 HTML 是按人的（脚本里带着本地存储前缀），地址却人人一样，
+所以它一律 `no-store`（`_no_store`），导航请求的条件头也摘掉（`_CONDITIONAL`）。
+门户登录 / 退出时整个源的缓存清一次（app/auth.py 的 `set_cookie` / `clear_cookie`）。
+
 ## 这里不做
 
 - **不缓存**：转发的是人家系统的动态页面，缓存策略原样带回去，由浏览器认。
@@ -150,6 +166,26 @@ _HOSTNAME = re.compile(r'^(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9][A-Za-z0-9.\-]*)(?::\
 _COOKIE_MANGLE = 'pxy'
 _COOKIE_PREFIXES = ('__Host-', '__Secure-')
 
+# 这条卡片路径底下的浏览器 Cookie 是哪个门户用户的（见模块头）。
+# 要活得比上游那些 Cookie 久：它先过期的话，下次进来会被当成别人的，把自己的登录删掉。
+# 所以给浏览器允许的上限（Chrome 是 400 天），而且上游每种一次 Cookie 就续一次
+_OWNER_COOKIE = 'portal_proxy_owner'
+_OWNER_TTL = 400 * 86400
+
+# 注入过脚本的 HTML 是「按人」的：脚本里带着这个门户用户的本地存储前缀（app/proxyhook.py），
+# 而同一张分享卡片大家的地址一模一样。浏览器缓存只认地址——上游没给 Cache-Control 时
+# （Starlette 的 StaticFiles 就不给，只给 ETag / Last-Modified）浏览器按启发式规则自己缓存，
+# 换个门户账号再打开，**请求都不发**，直接把上一个人那份端出来，进去就是上一个人的账号。
+# 二手系统（FreeMarket）实际这么串过号。所以这类响应一律 no-store，下面这几个头摘掉：
+# 带着 ETag / Last-Modified 的话，浏览器会拿旧的那份来问「变了没有」，上游一句 304 又把它端回来
+_CACHE_HEADERS = frozenset({b'cache-control', b'expires', b'etag', b'last-modified', b'age', b'pragma'})
+
+# 打开页面的那种请求（导航）上，浏览器拿着自己缓存的那份来问的条件头。
+# 改成 no-store 之前缓存下来的旧页面（里面是别人的前缀，或者老版本根本没分开的脚本）
+# 会这样来问，上游回 304 的话浏览器接着用旧的。摘掉之后上游只能回整份，由这边重新注入
+_CONDITIONAL = ('if-none-match', 'if-modified-since')
+_DOCUMENT_DESTS = ('document', 'iframe', 'frame')
+
 # 请求发给上游时声明的压缩方式。整站模式要把正文读出来改写，所以只能要
 # httpx 解得开的那几种——上游给了一个我们解不开的编码，改写那一步会当场抛异常。
 try:
@@ -228,6 +264,9 @@ class Target(NamedTuple):
     allow: tuple[str, ...]          # 整站模式下允许转发的域名后缀
     module: Any                     # app/proxy_webside/ 里认领它的模块，没有就是 None
     jar: bool                       # Cookie 代理：上游的登录态存服务器（app/cookiejar.py）
+    # 这张卡片上用谁的登录态（门户用户 id）：自己的卡片和普通分享是本人，
+    # 共享登录的分享是分享人。由 `_targets` 填，0 = 没填，按当前用户算（见 `_login_of`）
+    login: int = 0
 
     @property
     def mount(self) -> str:
@@ -268,7 +307,7 @@ def _targets(user_id: int) -> dict[str, Target]:
     for item in navstore.cards(user_id):
         target = _to_target(item)
         if target:
-            table[target.item_id] = target
+            table[target.item_id] = target._replace(login=user_id)
     # 管理员分享给这个人的卡片（navstore.shared）。归属校验的意思变成
     # 「是你的卡片，或者分享给了你」，仍然只查这个人自己的那份名单。
     # 卡片的配置照管理员那张走，但罐子用的是 user_id 这个人自己的（_cookie_out / _save_cookies）：
@@ -277,7 +316,8 @@ def _targets(user_id: int) -> dict[str, Target]:
     for item in navstore.shared(user_id):
         target = _to_target(item)
         if target:
-            table.setdefault(target.item_id, target)
+            login = int(item['ownerId']) if item.get('shareLogin') else user_id
+            table.setdefault(target.item_id, target._replace(login=login))
 
     _cache[user_id] = (now + _CACHE_TTL, rev, table)
     return table
@@ -307,6 +347,11 @@ def _to_target(item: object) -> Optional[Target]:
                   f'{parts.scheme}://{parts.netloc}', site, allow, module, jar)
 
 
+def _login_of(target: Target, user_id: int) -> int:
+    """这张卡片上用谁的登录态。见 `Target.login`。"""
+    return target.login or user_id
+
+
 def _target(user_id: int, item_id: str) -> Target:
     """**归属校验就是这一句**：查的是「这个人的」那张表，不是全局表。
 
@@ -321,18 +366,23 @@ def _target(user_id: int, item_id: str) -> Target:
     return target
 
 
-def _rewriter(target: Target, foreign: str = '', portal_origin: str = '') -> Rewriter:
+def _rewriter(target: Target, foreign: str = '', portal_origin: str = '',
+              user_id: int = 0) -> Rewriter:
     """`foreign` 是白名单之外、从链接点过来的那台主机（见 `_upstream`）。
 
     这时候页面在它那边，它自己那一族域名上的资源也该跟着走代理，
     所以这一次的改写把它的注册域临时并进白名单——只影响这一份响应，卡片的白名单不变。
+
+    `user_id` 拿来给注入脚本定本地存储的前缀（app/proxyhook.py），按「门户用户 + 卡片」分开。
+    调用方给的是 `_login_of` 那个人：共享登录时是分享人，两个人看到的是同一份。
     """
     allow = target.allow
     if foreign:
         name = foreign.lower().split(':', 1)[0]
         allow = tuple(sorted({*allow, name, proxyrewrite.site_of(name)}))
+    store = f'__portal:u{user_id}:{target.item_id}:' if user_id else ''
     return Rewriter(target.mount, allow, webside.browser_js(target.module),
-                    webside.rewrite_js(target.module), portal_origin=portal_origin)
+                    webside.rewrite_js(target.module), portal_origin=portal_origin, store=store)
 
 
 # ---------------------------------------------------------------- 白名单之外：只许公网
@@ -515,7 +565,7 @@ def _cookies_up(cookie: str) -> str:
         if not part:
             continue
         name = part.split('=', 1)[0].strip()
-        if name == COOKIE_NAME:
+        if name in (COOKIE_NAME, _OWNER_COOKIE):
             continue
         if name.startswith(_COOKIE_MANGLE):
             bare = name[len(_COOKIE_MANGLE):]
@@ -523,6 +573,42 @@ def _cookies_up(cookie: str) -> str:
                 part = bare + part[len(name):]
         kept.append(part)
     return '; '.join(kept)
+
+
+def _cookie_owner(cookie: str, user_id: int) -> tuple[bool, list[str]]:
+    """浏览器带来的这些 Cookie 是不是这个门户用户的。返回 (是不是, 浏览器里那些 Cookie 的名字)。
+
+    没有标记也算「不是」：改成这样之前种下的那些分不清是谁的，宁可让本人重登一次。
+    名字给 `_owner_cookies` 拿去删；门户自己那枚会话 Cookie 不在里面。
+    """
+    owner, names = None, []
+    for part in re.split(r';\s*', cookie or ''):
+        name, _, value = part.partition('=')
+        name = name.strip()
+        if not name or name == COOKIE_NAME:
+            continue
+        if name == _OWNER_COOKIE:
+            owner = value.strip()
+        else:
+            names.append(name)
+    return owner == str(user_id), names
+
+
+def _owner_cookies(target: Target, user_id: int, owned: bool, names: list[str],
+                   refresh: bool) -> list[tuple[bytes, bytes]]:
+    """随这次响应发给浏览器的 Set-Cookie：不是这个人的就先删掉，再把标记种成这个人。
+
+    要排在上游那几条 Set-Cookie **前面**：同名的话浏览器按顺序处理，上游刚种的才留得下。
+    只删得掉钉在卡片路径上的那些（上游种的、注入脚本种的都在这儿）；别处路径上的
+    删不着，但标记对不上时它们也不会被转给上游。
+    """
+    if owned and not refresh:
+        return []
+    secure = '; Secure' if COOKIE_SECURE else ''
+    out = [] if owned else [f'{name}=; Path={target.mount}; Max-Age=0{secure}' for name in names]
+    out.append(f'{_OWNER_COOKIE}={user_id}; Path={target.mount}; Max-Age={_OWNER_TTL}; '
+               f'HttpOnly; SameSite=Lax{secure}')
+    return [(b'set-cookie', value.encode('latin-1')) for value in out]
 
 
 def _cookie_out(request_cookie: str, target: Target, user_id: int,
@@ -542,7 +628,8 @@ def _cookie_out(request_cookie: str, target: Target, user_id: int,
     if not target.jar:
         return browser
 
-    jar = cookiejar.header_for(cookiejar.load(user_id, target.item_id), scheme, host, path)
+    jar = cookiejar.header_for(cookiejar.load(_login_of(target, user_id), target.item_id),
+                               scheme, host, path)
     if not jar:
         return browser
     if not browser:
@@ -569,7 +656,7 @@ def _save_cookies(resp: httpx.Response, target: Target, user_id: int,
     if not raw:
         return
     try:
-        cookiejar.store(user_id, target.item_id, raw, host, path)
+        cookiejar.store(_login_of(target, user_id), target.item_id, raw, host, path)
     except Exception as exc:                          # noqa: BLE001
         # 库写不进去（连接断了、磁盘满了）不该让人手里这个页面跟着 500。
         # 代价只是这次的登录态没记住，下次重登一遍
@@ -598,17 +685,23 @@ def _fetch_site(referer: str, scheme: str, host: str) -> str:
 
 def _request_headers(request: Request, target: Target, scheme: str, host: str,
                      rewriter: Optional[Rewriter], user_id: int = 0,
-                     path: str = '/') -> list[tuple[str, str]]:
+                     path: str = '/', owned: bool = True) -> list[tuple[str, str]]:
+    """`owned` 为 False = 浏览器带来的 Cookie 不是这个门户用户的（`_cookie_owner`），一条都不转。"""
     referer = _real_url(target, request.headers.get('referer', ''))
     out: list[tuple[str, str]] = []
     seen_cookie = False
+    dest = request.headers.get('sec-fetch-dest', '')
+    navigation = dest in _DOCUMENT_DESTS or (not dest and 'text/html' in request.headers.get('accept', ''))
     for name, value in request.headers.items():
         low = name.lower()
         if _dropped(low):
             continue
+        if target.site and navigation and low in _CONDITIONAL:
+            continue                           # 见 _CONDITIONAL
         if low == 'cookie':
             seen_cookie = True
-            value = _cookie_out(value, target, user_id, scheme, host, path)
+            # 不是这个人的那份不转，罐子里他自己那份照常补上来
+            value = _cookie_out(value if owned else '', target, user_id, scheme, host, path)
             if not value:
                 continue
         elif low == 'referer':
@@ -754,13 +847,16 @@ def _rewrite_location(value: str, target: Target, scheme: str, host: str,
 
 
 def _response_headers(resp: httpx.Response, target: Target, scheme: str, host: str,
-                      rewriter: Optional[Rewriter], decoded: bool) -> list[tuple[bytes, bytes]]:
+                      rewriter: Optional[Rewriter], decoded: bool,
+                      cookies: list[tuple[bytes, bytes]] = ()) -> list[tuple[bytes, bytes]]:
     """原样带回，除了逐跳首部、那几个讲源站规矩的（`_STRIP`）、Set-Cookie 和 Location。
 
     走 `resp.headers.raw` 而不是 `.items()`：Set-Cookie 一次可能有好几条，
     字典形状的首部只留得下最后一条，表现成「上游明明种了三枚 Cookie 只到了一枚」。
+
+    `cookies` 是 `_owner_cookies` 给的那几条，排在最前面，理由见那边。
     """
-    out: list[tuple[bytes, bytes]] = []
+    out: list[tuple[bytes, bytes]] = list(cookies)
     for raw_name, raw_value in resp.headers.raw:
         name = raw_name.decode('latin-1')
         low = name.lower()
@@ -780,6 +876,13 @@ def _response_headers(resp: httpx.Response, target: Target, scheme: str, host: s
         elif low == 'link' and rewriter is not None:
             value = rewriter.link_header(value, scheme, host)
         out.append((raw_name, value.encode('latin-1')))
+    return out
+
+
+def _no_store(headers: list[tuple[bytes, bytes]]) -> list[tuple[bytes, bytes]]:
+    """注入过脚本的 HTML 不许浏览器缓存，见 `_CACHE_HEADERS`。"""
+    out = [(name, value) for name, value in headers if name.lower() not in _CACHE_HEADERS]
+    out.append((b'cache-control', b'no-store'))
     return out
 
 
@@ -846,11 +949,15 @@ def enter(item_id: str, user: dict = Depends(require_login)):
 async def forward(item_id: str, path: str, request: Request,
                   user: dict = Depends(require_login)):
     diagnostics.event('proxy.resolve', card=item_id)
-    target = _target(int(user['id']), item_id)
+    user_id = int(user['id'])
+    target = _target(user_id, item_id)
     scheme, host, rest, foreign = _upstream(target, request.scope)
     if foreign:
         await _check_foreign(host)
-    rewriter = _rewriter(target, host if foreign else '', _origin_of(str(request.url))) if target.site else None
+    login = _login_of(target, user_id)
+    rewriter = (_rewriter(target, host if foreign else '', _origin_of(str(request.url)), login)
+                if target.site else None)
+    owned, browser_cookies = _cookie_owner('; '.join(request.headers.getlist('cookie')), login)
 
     url = f'{scheme}://{host}/{rest}'
     up_path = '/' + rest.split('?', 1)[0]
@@ -861,7 +968,7 @@ async def forward(item_id: str, path: str, request: Request,
     ctx = webside.Ctx(item_id, target.mount, target.base, scheme, host,
                       up_path, request.method)
     headers = _request_headers(request, target, scheme, host, rewriter,
-                               int(user['id']), up_path)
+                               user_id, up_path, owned)
     webside.on_request(target.module, ctx, headers)
 
     # 有没有请求体，看调用方自己说了什么，不按方法猜：GET 带体、POST 不带体都是有的。
@@ -886,11 +993,12 @@ async def forward(item_id: str, path: str, request: Request,
 
     # 存罐子挂在这一句：底下有「改写后整份发」和「流式转」两条出路，
     # 挂在这儿两条都覆盖得到，挂到 _response_headers 里则会被调用两次
-    _save_cookies(resp, target, int(user['id']), host, up_path)
+    _save_cookies(resp, target, user_id, host, up_path)
+    cookies = _owner_cookies(target, login, owned, browser_cookies, 'set-cookie' in resp.headers)
 
     if rewriter is not None and request.method != 'HEAD' and resp.status_code not in (204, 304):
         try:
-            rewritten = await _rewritten(resp, target, ctx, rewriter, scheme, host)
+            rewritten = await _rewritten(resp, target, ctx, rewriter, scheme, host, cookies)
         except httpx.HTTPError as exc:
             # 正文读到一半断了、或者压缩数据解不开。响应头还没发，回一个干净的 502，
             # 别让它变成一屏 500 的 traceback
@@ -911,7 +1019,7 @@ async def forward(item_id: str, path: str, request: Request,
     response = StreamingResponse(resp.aiter_bytes() if decode else resp.aiter_raw(),
                                  status_code=resp.status_code,
                                  background=BackgroundTask(resp.aclose))
-    response.raw_headers = _response_headers(resp, target, scheme, host, rewriter, decode)
+    response.raw_headers = _response_headers(resp, target, scheme, host, rewriter, decode, cookies)
     return response
 
 
@@ -934,7 +1042,8 @@ async def _read_capped(resp: httpx.Response):
 
 
 async def _rewritten(resp: httpx.Response, target: Target, ctx: webside.Ctx,
-                     rewriter: Rewriter, scheme: str, host: str) -> Optional[Response]:
+                     rewriter: Rewriter, scheme: str, host: str,
+                     cookies: list[tuple[bytes, bytes]] = ()) -> Optional[Response]:
     """要改写就把整份读进来改完再发；不用改的返回 None，由调用方照常流式转。
 
     改写必然要整份读进内存（HTML 里那些地址不按块对齐），所以只对 HTML/CSS/JS/JSON
@@ -958,7 +1067,7 @@ async def _rewritten(resp: httpx.Response, target: Target, ctx: webside.Ctx,
                 yield chunk
         big = StreamingResponse(chained(), status_code=resp.status_code,
                                 background=BackgroundTask(resp.aclose))
-        big.raw_headers = _response_headers(resp, target, scheme, host, rewriter, True)
+        big.raw_headers = _response_headers(resp, target, scheme, host, rewriter, True, cookies)
         return big
 
     await resp.aclose()
@@ -973,7 +1082,9 @@ async def _rewritten(resp: httpx.Response, target: Target, ctx: webside.Ctx,
         except (UnicodeError, LookupError) as exc:
             print(f'[代理] {host} 的这份 {kind} 改写不了，按原样发回: {exc}')
 
-    headers = _response_headers(resp, target, scheme, host, rewriter, True)
+    headers = _response_headers(resp, target, scheme, host, rewriter, True, cookies)
+    if kind == 'html':
+        headers = _no_store(headers)           # 里面注入了按人的脚本，见 _CACHE_HEADERS
     headers.append((b'content-length', str(len(body)).encode('latin-1')))
     response = Response(content=body, status_code=resp.status_code)
     response.raw_headers = headers
@@ -1043,6 +1154,10 @@ async def forward_ws(ws: WebSocket, item_id: str, path: str):
         url += '?' + ws.url.query
 
     ws_path = '/' + rest.split('?', 1)[0]
+    # 握手这一下没法顺手删浏览器里的 Cookie，只做到「不是这个人的不转」；
+    # 删和换标记由同一页面的 HTTP 请求去做
+    owned, _ = _cookie_owner('; '.join(ws.headers.getlist('cookie')),
+                             _login_of(target, int(user['id'])))
     headers = []
     seen_cookie = False
     for name, value in ws.headers.items():
@@ -1055,7 +1170,7 @@ async def forward_ws(ws: WebSocket, item_id: str, path: str):
             seen_cookie = True
             # WebSocket 这条也要带罐子里那份：带实时推送的站点多半在握手时就查登录，
             # 只给 HTTP 那条接上的话，页面本身打得开，实时那块一直「连接中」
-            value = _cookie_out(value, target, int(user['id']), scheme, host, ws_path)
+            value = _cookie_out(value if owned else '', target, int(user['id']), scheme, host, ws_path)
             if not value:
                 continue
         elif low == 'origin':

@@ -199,9 +199,19 @@ conf.json 的 `idp.clients`（启动时读），和**卡片编辑框里登记的
   数据是 `/api/nav` 回的 `shared`，**不在 `data` 里、不进 store.js 的 `state`**——进了就会被自动保存
   当成他自己的卡片写回去，变成一份拷贝。管理员改配置他那边跟着变，取消分享 / 删卡片 /
   分享人被降级，卡片就没了（删卡片时分享行留着，读的时候连着 nav_items 看）。
-- **分享的是配置，不是登录。** 门户代理、额外域名、Cookie 代理、单点登录全照管理员那张卡片走，
+- **默认分享的是配置，不是登录。** 门户代理、额外域名、Cookie 代理、单点登录全照管理员那张卡片走，
   但 Cookie 罐子钉在 (被分享的人, 卡片 id) 上，单点登录认的是他自己登着的门户账号。
-  别改成「用分享人的罐子」——那等于把管理员在外部站点的登录态交给每一个被分享的人。
+  **别把默认改成「用分享人的罐子」**——那等于把管理员在外部站点的登录态交给每一个被分享的人。
+- **登录要逐人勾**（编辑框「共享登录」那一栏，只列已分享的人，`card_grants.share_login`，
+  跟着 `PUT /api/nav/shares/<id>` 的 `login` 存）。勾了的人在这张卡片上用的是管理员的登录，
+  三处一起换：proxy.py 的 `Target.login` 定罐子、Cookie 标记和本地存储前缀用谁的
+  （`_targets` 按 `navstore.shared` 带回的 `shareLogin` / `ownerId` 填，其余地方一律走 `_login_of`）；
+  单点登录由 `idp.login_as` 把授权码发给管理员本人。只换一处的话会出现「Cookie 是管理员的、
+  单点登录进去却是自己」这种半吊子。管理员的登录只有存在服务器上的（Cookie 代理）和门户替他登的
+  （单点登录）分得出去，两样都没开时编辑框会提示勾了也没用。
+  `share_login` 是后加的列，老库靠 db.py 的 `_COLUMNS` 在启动时补（MySQL 5.7 没有 `ADD COLUMN IF NOT EXISTS`）。
+  **浏览器那一侧也按门户用户分开**（见门户代理那一节「上游登录按门户用户分开」）：分享的卡片
+  大家用的是同一个卡片 id，同一个浏览器里换个门户账号登进来，不分开的话进去就是上一个人。
 - **普通用户只能登进分享给他的系统**（`idp.allowed`，授权端点和 userinfo 都查）；管理员都能，
   conf.json 里登记的客户端谁都能。没分享给他时停在门户报错页，不带 `access_denied` 跳回去。
 - 上一版只有单点登录卡片能「授权」，关单点登录时授权行留着、卡片从对方页面上消失。
@@ -375,6 +385,26 @@ conf.json 的 `idp.clients`（启动时读），和**卡片编辑框里登记的
   `/api/proxy/<id>/`，只跟着自己这个服务走（不改的话几个系统的同名 Cookie 会互相顶掉，
   表现成「开了 B 系统 A 系统就掉登录」）。http 门户下还要把 `Secure` 去掉、
   `SameSite=None` 降成 `Lax`，不然浏览器直接不存。
+- **上游登录按门户用户分开，两半都要。** 被代理的页面全在门户这一个源底下：
+  - Cookie：卡片路径底下另种一枚 HttpOnly 的 `portal_proxy_owner`（门户用户 id，400 天，
+    上游每种一次 Cookie 续一次）。对不上或没有就一条浏览器 Cookie 都不转，并在响应**最前面**
+    排上删除那些 Cookie 的 Set-Cookie（proxy.py 的 `_cookie_owner` / `_owner_cookies`）。
+    没标记按「别人的」办——上线后每个人第一次进去会掉一次登录，这是故意的。
+  - localStorage / sessionStorage：注入的脚本把它们换成带前缀（`__portal:u<用户>:<卡片>:`）
+    的一层（proxyhook.py 的 `scopedStorage`）。**实际串过号**：二手系统（FreeMarket）把 JWT
+    放在 localStorage，zav 在 makuro 用过的浏览器里打开分享来的卡片，直接就是 makuro——
+    它的路由守卫见到已有 token 就跳过单点登录带回来的票。
+  - 直接转发模式不注入脚本，localStorage 那一半在那儿**没有分开**；IndexedDB 哪种模式都没分。
+  - 「门户用户」指的是 `Target.login`：共享登录的分享里是分享人，见上面分享那一节。
+  - **浏览器缓存会把上面两条一起废掉**：本地存储前缀写在注入的那段脚本里，HTML 因此是按人的，
+    地址却人人一样。上游没给 `Cache-Control` 时（FreeMarket 用的 Starlette `StaticFiles` 就只给
+    ETag / Last-Modified）浏览器按启发式规则缓存，换账号再打开**请求都不发**，拿到的是上一个人的页面。
+    分开存储那一版上线后照样串号，就是这个原因（拿 Edge 复现过）。所以三道：注入过脚本的 HTML
+    `no-store` 并摘掉校验头（proxy.py 的 `_no_store`）；整站模式的导航请求摘掉 `If-None-Match` /
+    `If-Modified-Since`（`_CONDITIONAL`，不然旧缓存问一句、上游回 304 又端回来）；门户登录 / 退出的响应带
+    `Clear-Site-Data: "cache"`（auth.py 的 `set_cookie` / `clear_cookie`），清掉那之前就缓存下来的
+    （启发式缓存还新鲜时根本不发请求，前两道够不着它）。只在 https 下生效；**别加 `"storage"`**，
+    那会把每个人在每个站上存的登录一起清掉。
 - **CDN 塞进来的请求头也要摘掉**（proxy.py 的 `_dropped`：`cf-*` 整族、`cdn-loop`、
   `true-client-ip`、`via`）。门户挂在 Cloudflare 后面时每个请求都带着它们，而上游自己
   多半也在 Cloudflare 后面，见到 `cf-connecting-ip` 直接 403——メルカリ 就是这样，

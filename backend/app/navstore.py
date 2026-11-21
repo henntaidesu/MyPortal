@@ -35,9 +35,13 @@
 被分享的人看到的是**那张卡片本身**，不是一份拷贝：不进他的 nav_groups / nav_items，
 他存导航时也不会把它写进去，管理员改了配置他那边跟着变，取消分享就没了。
 
-**分享的是配置，不是登录。** 卡片上的地址、门户代理、额外域名、Cookie 代理、单点登录
+**默认分享的是配置，不是登录。** 卡片上的地址、门户代理、额外域名、Cookie 代理、单点登录
 这些照管理员那张走；但 Cookie 代理的罐子钉在 (被分享的人, 卡片) 上，单点登录认的是
 他自己登着的门户账号——他用的是自己的登录，管理员的登录态一条都不会交给他。
+
+管理员可以逐人选「共享登录」（`card_grants.share_login`）：选了的那个人在这张卡片上
+用的是**管理员的**登录——罐子用管理员那份、单点登录以管理员的身份发码（app/idp.py 的
+`login_as`）、浏览器里的 Cookie 标记和本地存储前缀也按管理员算（app/proxy.py 的 `Target.login`）。
 """
 import json
 import time
@@ -324,11 +328,14 @@ def shared(user_id: int) -> list[dict]:
     两处用它：/api/nav 带回去画在页面上；app/proxy.py 拿它补进这个人的代理目标表——
     开着门户代理的卡片点开就是 /api/proxy/<那张卡片 id>/，单点登录入口多半也在底下，
     不补的话被分享的人一点开就是 404。
+
+    带回去的卡片上多两项：`shareLogin`（这个人是不是连登录一起被分享的）、
+    `ownerId`（分享人的用户 id，app/proxy.py 拿它定这张卡片用谁的登录；不下发给浏览器）。
     """
     with db.cursor() as cur:
         cur.execute(
             "SELECT i.group_id, i.client_id, i.name, i.url, i.descr, i.icon, i.proxy, i.extra, "
-            "u.username, u.display_name "
+            "u.username, u.display_name, g.owner_id, g.share_login "
             "FROM card_grants g "
             "JOIN users u ON u.id = g.owner_id AND u.is_active = 1 AND u.role = 'admin' "
             "JOIN nav_items i ON i.user_id = g.owner_id AND i.client_id = g.item_id "
@@ -339,20 +346,26 @@ def shared(user_id: int) -> list[dict]:
     for row in rows:
         item = _row_to_item(row)
         item['owner'] = row['display_name'] or row['username']
+        item['ownerId'] = int(row['owner_id'])
+        item['shareLogin'] = bool(row['share_login'])
         out.append(item)
     return out
 
 
-def shares(owner_id: int, item_id: str) -> list[int]:
-    """这张卡片分享给了谁（用户 id）。卡片编辑框读回来用。"""
+def shares(owner_id: int, item_id: str) -> dict:
+    """这张卡片分享给了谁、其中哪几个连登录一起（都是用户 id）。卡片编辑框读回来用。"""
     with db.cursor() as cur:
-        cur.execute('SELECT user_id FROM card_grants WHERE owner_id = %s AND item_id = %s',
-                    (owner_id, item_id))
-        return sorted(int(r['user_id']) for r in cur.fetchall())
+        cur.execute('SELECT user_id, share_login FROM card_grants '
+                    'WHERE owner_id = %s AND item_id = %s', (owner_id, item_id))
+        rows = cur.fetchall()
+    return {'users': sorted(int(r['user_id']) for r in rows),
+            'login': sorted(int(r['user_id']) for r in rows if r['share_login'])}
 
 
-def set_shares(owner_id: int, item_id: str, user_ids: list[int]) -> list[int]:
-    """整份换掉这张卡片的分享名单，返回换完的。不存在的用户 id 和分享人自己悄悄丢掉。
+def set_shares(owner_id: int, item_id: str, user_ids: list[int],
+               login_ids: list[int] = ()) -> dict:
+    """整份换掉这张卡片的分享名单，返回换完的（形状同 `shares`）。
+    不存在的用户 id 和分享人自己悄悄丢掉；`login_ids` 是其中连登录一起分享的，不在名单里的忽略。
 
     被取消的人在这张卡片上的 Cookie 罐子一并收掉：取消分享的本意就是「别再让他用」，
     罐子留着的话，哪天再分享回来他直接就是登录状态。他自己名下恰好有张同 id 的
@@ -364,6 +377,7 @@ def set_shares(owner_id: int, item_id: str, user_ids: list[int]) -> list[int]:
             marks = ', '.join(['%s'] * len(wanted))
             cur.execute(f'SELECT id FROM users WHERE id IN ({marks})', tuple(wanted))
             wanted = {int(r['id']) for r in cur.fetchall()}
+        login = {int(u) for u in login_ids or []} & wanted
         cur.execute('SELECT user_id FROM card_grants WHERE owner_id = %s AND item_id = %s',
                     (owner_id, item_id))
         before = {int(r['user_id']) for r in cur.fetchall()}
@@ -374,11 +388,15 @@ def set_shares(owner_id: int, item_id: str, user_ids: list[int]) -> list[int]:
                         'AND NOT EXISTS (SELECT 1 FROM nav_items '
                         'WHERE user_id = %s AND client_id = %s)', (uid, item_id, uid, item_id))
         if wanted - before:
-            cur.executemany('INSERT INTO card_grants (owner_id, item_id, user_id) '
-                            'VALUES (%s, %s, %s)',
-                            [(owner_id, item_id, uid) for uid in wanted - before])
+            cur.executemany('INSERT INTO card_grants (owner_id, item_id, user_id, share_login) '
+                            'VALUES (%s, %s, %s, %s)',
+                            [(owner_id, item_id, uid, int(uid in login)) for uid in wanted - before])
+        for uid in wanted & before:
+            cur.execute('UPDATE card_grants SET share_login = %s '
+                        'WHERE owner_id = %s AND item_id = %s AND user_id = %s',
+                        (int(uid in login), owner_id, item_id, uid))
     _bump_shared()
-    return sorted(wanted)
+    return {'users': sorted(wanted), 'login': sorted(login)}
 
 
 # ---------------------------------------------------------------- 老数据

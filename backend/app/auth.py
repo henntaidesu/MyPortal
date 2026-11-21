@@ -201,7 +201,18 @@ def require_admin(request: Request) -> dict:
     return user
 
 
+# 换人的那一刻（登录、退出）把浏览器里门户这个源的 HTTP 缓存清一次。
+# 被代理的页面全在这个源底下，分享出去的卡片大家地址一样，浏览器缓存又只认地址：
+# 上一个人缓存下来的页面和接口数据（启发式缓存的连请求都不发）会原样端给下一个人。
+# 代理那边已经让注入过脚本的 HTML 不进缓存（app/proxy.py 的 `_no_store`），这一下兜的是
+# 那之前就缓存下来的，以及上游自己标了可缓存、里面却带着个人数据的接口。
+# 只清缓存不清存储：localStorage 里各人的东西已经按人分开了，清掉等于让所有人在每个站上重登。
+# 浏览器只在 https 下认这个头，http 部署的门户上它不起作用
+_CLEAR_CACHE = ('clear-site-data', '"cache"')
+
+
 def set_cookie(response: Response, token: str) -> None:
+    response.headers.append(*_CLEAR_CACHE)
     response.set_cookie(
         COOKIE_NAME, token,
         max_age=_TTL,
@@ -213,4 +224,5 @@ def set_cookie(response: Response, token: str) -> None:
 
 
 def clear_cookie(response: Response) -> None:
+    response.headers.append(*_CLEAR_CACHE)
     response.delete_cookie(COOKIE_NAME, path='/')

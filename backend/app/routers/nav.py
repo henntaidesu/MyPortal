@@ -7,7 +7,7 @@
 冲突策略还是「后写的盖先写的」：两个浏览器同时改，后按下的那边赢。
 自己给自己看的一页东西，为它做合并不值当。
 
-    GET  /api/nav/shares/<卡片 id>   卡片编辑框：这张卡片分享给了谁（管理员）
+    GET  /api/nav/shares/<卡片 id>   卡片编辑框：这张卡片分享给了谁、哪几个共享登录（管理员）
     PUT  /api/nav/shares/<卡片 id>   卡片编辑框：整份换掉分享名单（管理员）
 
 分享名单挂在 (当前这个管理员, 卡片 id) 上，卡片 id 只认他自己名下的——
@@ -30,8 +30,10 @@ class NavIn(BaseModel):
 
 
 # 分享过来的卡片只下发画卡片用得上的这几项。proxyHosts、cookieJar 这些配置照样生效——
-# 代理那边（app/proxy.py）拿的是管理员那张卡片的全份——只是浏览器用不着它们
-_SHARED_FIELDS = ('id', 'name', 'url', 'desc', 'icon', 'proxy', 'sso', 'ssoLogin', 'owner')
+# 代理那边（app/proxy.py）拿的是管理员那张卡片的全份——只是浏览器用不着它们。
+# shareLogin 要下发：连登录一起分享时点进去是分享人的账号，卡片上得看得出来
+_SHARED_FIELDS = ('id', 'name', 'url', 'desc', 'icon', 'proxy', 'sso', 'ssoLogin', 'owner',
+                  'shareLogin')
 
 
 @router.get('')
@@ -62,15 +64,17 @@ def put_nav(body: NavIn, user: dict = Depends(require_login)):
 
 class SharesIn(BaseModel):
     users: list[int]
+    login: list[int] = []            # 其中连登录一起分享的，默认一个都没有
 
 
 @router.get('/shares/{item_id}')
 def get_shares(item_id: str, admin: dict = Depends(require_admin)):
-    return {'users': navstore.shares(int(admin['id']), item_id[:64])}
+    return navstore.shares(int(admin['id']), item_id[:64])
 
 
 @router.put('/shares/{item_id}')
 def put_shares(item_id: str, body: SharesIn, admin: dict = Depends(require_admin)):
-    users = navstore.set_shares(int(admin['id']), item_id[:64], body.users)
-    print(f'[导航] {admin["username"]} 把卡片 {item_id[:64]} 分享给了 {len(users)} 个人')
-    return {'users': users}
+    saved = navstore.set_shares(int(admin['id']), item_id[:64], body.users, body.login)
+    print(f'[导航] {admin["username"]} 把卡片 {item_id[:64]} 分享给了 {len(saved["users"])} 个人，'
+          f'其中 {len(saved["login"])} 个共享登录')
+    return saved

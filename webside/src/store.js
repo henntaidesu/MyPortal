@@ -132,7 +132,10 @@ async function pull() {
   const res = await api('/api/nav')
   sync.offline = false
   const list = Array.isArray(res.shared) ? res.shared : []
-  shared.splice(0, shared.length, ...list.map((i) => ({ ...normalizeItem(i), owner: i.owner || '' })))
+  // shareLogin：分享人连登录一起给了我，点进去是他的账号（卡片上要看得出来，见 NavCard.vue）
+  shared.splice(0, shared.length, ...list.map((i) => ({
+    ...normalizeItem(i), owner: i.owner || '', shareLogin: !!i.shareLogin
+  })))
   return res.data
 }
 

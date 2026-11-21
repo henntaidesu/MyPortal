@@ -29,7 +29,9 @@ client_id 里带点会让 userinfo 拆不开 token。
 卡片上登记的客户端，管理员都能用，**普通用户要那张卡片分享给了他**（`allowed`，
 分享名单在 card_grants 表，卡片编辑框「分享给」那一栏里勾）。分享了的卡片会出现在他的页面上
 （app/navstore.py 的 `shared`），他点进去登进那个系统的是**他自己**的门户账号——
-分享的是卡片的配置，不是管理员的登录。conf.json 里登记的客户端没有卡片可分享，仍然谁都能用。
+分享的是卡片的配置，不是管理员的登录。管理员给他勾了「共享登录」的话例外：
+发码时换成管理员本人（`login_as`），他登进那个系统就是管理员的账号。
+conf.json 里登记的客户端没有卡片可分享，仍然谁都能用。
 
 ## 票据都长什么样
 
@@ -213,6 +215,25 @@ def allowed(cli: dict, user: dict) -> bool:
 
 
 # ---------------------------------------------------------------- 卡片上登记的客户端
+
+def login_as(cli: dict, user: dict) -> dict:
+    """授权码以谁的身份发。通常就是登着门户的这个人。
+
+    登记这个客户端的那张卡片**连登录一起**分享给了他（card_grants.share_login）时，
+    换成分享人：共享登录的意思就是「他用我的账号进那个系统」。查不到分享人（被删、被停用）
+    时退回他自己——不能因为这一步查不到就让人以别人的身份进去。
+    """
+    if 'owner_id' not in cli or int(user['id']) == cli['owner_id']:
+        return user
+    with db.cursor() as cur:
+        cur.execute('SELECT 1 FROM card_grants WHERE owner_id = %s AND item_id = %s '
+                    'AND user_id = %s AND share_login = 1',
+                    (cli['owner_id'], cli['item_id'], int(user['id'])))
+        if cur.fetchone() is None:
+            return user
+    owner = _lookup(cli['owner_id'])
+    return owner if owner is not None and owner['is_active'] else user
+
 
 def card_client(owner_id: int, item_id: str) -> Optional[dict]:
     """卡片编辑框读回来用。**不带 client_secret**，只说配没配。"""

@@ -52,22 +52,39 @@ const idp = reactive({
    卡片的配置全照这一张走，登录却是他自己的：Cookie 代理存的是他自己的罐子，
    单点登录认的是他自己的门户账号（app/navstore.py 的 shared、app/idp.py 的 allowed）。
    名单单独存在 /api/nav/shares，不跟着导航走：导航那棵树会进 localStorage、整份推来推去，
-   而名单是这张卡片「给别人」的东西 ---- */
+   而名单是这张卡片「给别人」的东西。
+   「共享登录」是名单里再勾一遍：勾了的人用的是**我的**登录（app/navstore.py 的 shared），
+   默认一个都不勾 ---- */
 const shares = ref([])
+const shareLogin = ref([])        // shares 里连登录一起分享的那几个
 const sharesLoaded = ref(false)   // 没读到就别往回写，不然一次保存会把已有的分享清空
-let sharesBefore = []             // 打开时读到的那份，没变就不往回写
+let sharesBefore = { users: [], login: [] }   // 打开时读到的那份，没变就不往回写
 const people = ref([])            // 除了自己以外的所有账号
+const sharedPeople = computed(() => people.value.filter((u) => shares.value.includes(u.id)))
+/* 我的登录有地方可分：存在服务器上的（Cookie 代理），或者门户替他登（单点登录）。
+   两样都没开时我的登录只在我自己的浏览器里，勾了也分不出去 */
+const loginShareable = computed(() => (!!form.proxy && form.cookieJar) || form.sso)
+
+function toggleIn(list, id) {
+  const i = list.indexOf(id)
+  if (i > -1) list.splice(i, 1)
+  else list.push(id)
+}
 
 function toggleShare(id) {
-  const i = shares.value.indexOf(id)
-  if (i > -1) shares.value.splice(i, 1)
-  else shares.value.push(id)
+  toggleIn(shares.value, id)
+  // 不分享给他了，共享登录那一栏里也别留着他
+  if (!shares.value.includes(id)) shareLogin.value = shareLogin.value.filter((x) => x !== id)
+}
+
+function sameSet(a, b) {
+  const set = new Set(b)
+  return a.length === set.size && a.every((id) => set.has(id))
 }
 
 function sharesChanged() {
   if (!sharesLoaded.value) return false
-  const before = new Set(sharesBefore)
-  return shares.value.length !== before.size || shares.value.some((id) => !before.has(id))
+  return !sameSet(shares.value, sharesBefore.users) || !sameSet(shareLogin.value, sharesBefore.login)
 }
 
 async function loadShares() {
@@ -77,8 +94,9 @@ async function loadShares() {
     if (props.item?.id) {
       const res = await api('/api/nav/shares/' + encodeURIComponent(cardId))
       shares.value = res.users || []
+      shareLogin.value = res.login || []
     }
-    sharesBefore = [...shares.value]
+    sharesBefore = { users: [...shares.value], login: [...shareLogin.value] }
     sharesLoaded.value = true
   } catch {
     // 问不到就不画那一栏，分享名单维持原样
@@ -221,7 +239,7 @@ async function submit() {
     }
     if (sharesChanged()) {
       await api('/api/nav/shares/' + encodeURIComponent(cardId), {
-        method: 'PUT', body: { users: shares.value }
+        method: 'PUT', body: { users: shares.value, login: shareLogin.value }
       })
     }
   } catch (e) {
@@ -393,8 +411,8 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
           <HintTip>
             对方页面上多出这张卡片，只能点开用，改不了，也删不掉这次分享。
             门户代理、Cookie 代理、单点登录这些配置跟着这张卡片走，
-            <strong>登录用的是他自己的</strong>：单点登录以他自己的门户账号登进去，
-            Cookie 代理存的是他自己的登录数据，你的登录不会分给他。
+            <strong>登录默认用他自己的</strong>：单点登录以他自己的门户账号登进去，
+            Cookie 代理存的是他自己的登录数据。要连你的登录一起给他，在下面「共享登录」里勾上他。
           </HintTip>
         </span>
         <div class="chips">
@@ -405,6 +423,28 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
             {{ u.display_name }}
           </button>
           <span v-if="!people.length" class="none">还没有别的用户</span>
+        </div>
+      </div>
+
+      <!-- 分享出去的人里，哪几个连我的登录一起用。只列已经分享给的人，默认一个都不勾 -->
+      <div v-if="isAdmin && sharesLoaded && shares.length" class="field">
+        <span class="lb">共享登录<em v-if="shareLogin.length">{{ shareLogin.length }} 人</em>
+          <HintTip :warn="!!shareLogin.length && !loginShareable">
+            勾上的人用的是<strong>你的登录</strong>：Cookie 代理用你存下的那份登录数据，
+            单点登录以你的门户账号登进那个系统，他在里面做的事都算你的。没勾的人用他自己的。
+            收回之后，他已经登进去的那次会话要等那个系统自己过期。
+            <span v-if="!loginShareable" class="warn">
+              这张卡片 Cookie 代理和单点登录都没开，你的登录只在你自己的浏览器里，勾了也分不出去。
+            </span>
+          </HintTip>
+        </span>
+        <div class="chips">
+          <button v-for="u in sharedPeople" :key="u.id" type="button" class="chip"
+            :class="{ on: shareLogin.includes(u.id), off: !u.is_active }"
+            :title="u.username" @click="toggleIn(shareLogin, u.id)">
+            <svg v-if="shareLogin.includes(u.id)" viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 8.5 3 3 6-7" /></svg>
+            {{ u.display_name }}
+          </button>
         </div>
       </div>
 

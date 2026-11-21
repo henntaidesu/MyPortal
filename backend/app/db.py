@@ -330,10 +330,12 @@ _DDL = [
       -- 表名还叫 grants 是历史原因：上一版只有单点登录卡片能「授权」，改名就得搬数据。
       -- item_id 是卡片的 client_id，理由同 proxy_cookies：不挂外键指向 nav_items。
       -- 卡片删了，这几行留着不删，读的时候连着 nav_items 一起看
-      owner_id   BIGINT UNSIGNED NOT NULL,
-      item_id    VARCHAR(64)     NOT NULL,
-      user_id    BIGINT UNSIGNED NOT NULL,
-      created_at TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      owner_id    BIGINT UNSIGNED NOT NULL,
+      item_id     VARCHAR(64)     NOT NULL,
+      user_id     BIGINT UNSIGNED NOT NULL,
+      share_login TINYINT(1)      NOT NULL DEFAULT 0
+                  COMMENT '连登录一起分享：他用分享人的登录态（app/navstore.py 的 shared）',
+      created_at  TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
       PRIMARY KEY (owner_id, item_id, user_id),
       KEY idx_grant_user (user_id),
       CONSTRAINT fk_grant_owner FOREIGN KEY (owner_id)
@@ -342,6 +344,16 @@ _DDL = [
         REFERENCES users (id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='卡片分享给了谁'
     """,
+]
+
+
+# 后加的列。`CREATE TABLE IF NOT EXISTS` 管不到已经建好的表，所以每次启动查一遍，缺了就补。
+# MySQL 5.7 没有 `ADD COLUMN IF NOT EXISTS`（MariaDB 才有），只能先问 information_schema。
+# 新装的库在上面 _DDL 里就有这些列，这里查到了就什么都不做
+_COLUMNS = [
+    ('card_grants', 'share_login',
+     "ALTER TABLE card_grants ADD COLUMN share_login TINYINT(1) NOT NULL DEFAULT 0 "
+     "COMMENT '连登录一起分享：他用分享人的登录态（app/navstore.py 的 shared）' AFTER user_id"),
 ]
 
 
@@ -371,6 +383,12 @@ def init() -> None:
             with conn.cursor() as cur:
                 for ddl in _DDL:
                     cur.execute(ddl)
+                for table, column, ddl in _COLUMNS:
+                    cur.execute('SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = %s '
+                                'AND TABLE_NAME = %s AND COLUMN_NAME = %s',
+                                (config.DB_NAME, table, column))
+                    if cur.fetchone() is None:
+                        cur.execute(ddl)
             conn.commit()
         finally:
             conn.close()

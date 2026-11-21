@@ -23,9 +23,11 @@ const href = computed(() => {
 })
 /* 两种代理模式点开的东西不一样，标签上分得开：出问题时先看这张卡片走的是哪一种 */
 const mode = computed(() => (props.item.proxy === 'site' ? '整站' : '代理'))
+/* 分享过来、连登录一起分享的卡片：点进去是分享人的账号，鼠标停上去得看得出来 */
+const as = computed(() => (props.item.shareLogin ? `·用 ${props.item.owner || '分享人'} 的登录` : ''))
 const hint = computed(() => {
-  if (sso.value) return `${props.item.url}（经门户单点登录）`
-  return props.item.proxy ? `${props.item.url}（经门户代理·${mode.value}）` : props.item.url
+  if (sso.value) return `${props.item.url}（经门户单点登录${as.value}）`
+  return props.item.proxy ? `${props.item.url}（经门户代理·${mode.value}${as.value}）` : props.item.url
 })
 </script>
 

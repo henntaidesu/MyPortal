@@ -219,11 +219,15 @@ _META_CHARSET = re.compile(r'<meta\s[^>]*charset\s*=[^>]*>', re.I)
 class Rewriter:
     """一张卡片一套改写规则。`mount` 是 `/api/proxy/<卡片 id>/`。"""
 
-    __slots__ = ('mount', 'base', 'allow', 'extra_js', 'rewrite_code', '_proxied', 'portal_origin')
+    __slots__ = ('mount', 'base', 'allow', 'extra_js', 'rewrite_code', '_proxied', 'portal_origin',
+                 'store')
 
     def __init__(self, mount: str, allow: tuple[str, ...], extra_js: str = '',
-                 rewrite_code: bool = True, *, portal_origin: str = ''):
+                 rewrite_code: bool = True, *, portal_origin: str = '', store: str = ''):
         self.portal_origin = portal_origin.rstrip('/')
+        # 注入的脚本给 localStorage / sessionStorage 加的键前缀（见 app/proxyhook.py），
+        # 按「门户用户 + 卡片」分开，由 app/proxy.py 的 `_rewriter` 给
+        self.store = store
         self.mount = mount
         self.base = f'{mount}{MARK}/'
         self.allow = allow
@@ -391,7 +395,8 @@ class Rewriter:
         挤出文档开头那 1024 字节，浏览器就猜不到编码了，表现成一屏乱码。
         （响应头里的 charset 本来优先级更高，但上游不给这个头的页面也有。）
         """
-        script = proxyhook.script(self.base, self.mount, scheme, host, self.allow, self.extra_js)
+        script = proxyhook.script(self.base, self.mount, scheme, host, self.allow, self.extra_js,
+                                  store=self.store)
         head = _HEAD.search(text)
         if head:
             at = head.end()

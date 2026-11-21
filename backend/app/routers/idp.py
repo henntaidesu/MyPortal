@@ -109,9 +109,14 @@ def authorize(request: Request, client_id: str = '', redirect_uri: str = '',
         print(f'[单点登录] {user["username"]} 不在「{cli["name"]}」的分享名单里，拒绝')
         return _error_page(f'「{cli["name"]}」这张卡片还没有分享给你，请联系管理员。', 403)
 
-    code = idp.issue_code(cli, user, redirect_uri=redirect_uri, scope=scope, nonce=nonce,
+    # 卡片连登录一起分享给了他的话，码发给分享人（idp.login_as），他进去就是分享人的账号
+    acting = idp.login_as(cli, user)
+    code = idp.issue_code(cli, acting, redirect_uri=redirect_uri, scope=scope, nonce=nonce,
                           challenge=code_challenge, method=method, issuer=_issuer(request))
-    print(f'[单点登录] {user["username"]} 登录「{cli["name"]}」')
+    if acting is user:
+        print(f'[单点登录] {user["username"]} 登录「{cli["name"]}」')
+    else:
+        print(f'[单点登录] {user["username"]} 以 {acting["username"]} 的身份登录「{cli["name"]}」（共享登录）')
     return RedirectResponse(idp.redirect_with(redirect_uri, {'code': code, 'state': state}),
                             status_code=303)
 
