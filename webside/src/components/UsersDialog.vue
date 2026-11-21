@@ -77,10 +77,10 @@ function toggleActive(u) {
 }
 
 function resetPassword(u) {
-  const pw = prompt(`给「${u.username}」设一个新口令（至少 6 位，留空=取消本地口令，只能走单点登录）`)
+  const pw = prompt(`给「${u.username}」设一个新密码（至少 6 位，留空=取消本地密码，只能走单点登录）`)
   if (pw === null) return
   run(() => api(`/api/users/${u.id}/password`, { method: 'PUT', body: { password: pw || null } }),
-      `${u.username} 的口令已重置，他所有设备上的登录都失效了`)
+      `${u.username} 的密码已重置，他所有设备上的登录都失效了`)
 }
 
 function kick(u) {
@@ -132,7 +132,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
               <button class="mini" :disabled="busy" @click="toggleActive(u)">
                 {{ u.is_active ? '停用' : '启用' }}
               </button>
-              <button class="mini" :disabled="busy" @click="resetPassword(u)">重置口令</button>
+              <button class="mini" :disabled="busy" @click="resetPassword(u)">重置密码</button>
               <button class="mini" :disabled="busy" @click="kick(u)">踢下线</button>
               <button class="mini danger" :disabled="busy || u.id === auth.user.id"
                       @click="remove(u)">删除</button>
@@ -144,16 +144,15 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
       <div v-if="adding" class="add">
         <label class="field">
           <span class="lb">用户名</span>
-          <input v-model="form.username" spellcheck="false" placeholder="字母、数字和 . _ @ -" />
+          <input v-model="form.username" spellcheck="false" />
         </label>
         <label class="field">
-          <span class="lb">口令</span>
-          <input v-model="form.password" type="password" autocomplete="new-password"
-                 placeholder="留空 = 只能走单点登录" />
+          <span class="lb">密码</span>
+          <input v-model="form.password" type="password" autocomplete="new-password" />
         </label>
         <label class="field">
           <span class="lb">显示名</span>
-          <input v-model="form.display_name" placeholder="留空就用用户名" />
+          <input v-model="form.display_name" />
         </label>
         <label class="field">
           <span class="lb">角色</span>

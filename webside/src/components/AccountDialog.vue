@@ -49,7 +49,7 @@ async function saveProfile() {
 async function changePassword() {
   if (busy.value) return
   if (form.new_password !== form.confirm) {
-    error.value = '两次输入的新口令不一样'
+    error.value = '两次输入的新密码不一样'
     return
   }
   busy.value = true
@@ -61,9 +61,9 @@ async function changePassword() {
     })
     form.old_password = form.new_password = form.confirm = ''
     // 后端改完口令会顺手换一张新 Cookie，所以这儿不会被踢回登录页
-    notice.value = '口令已改。其它设备上的登录都已经失效'
+    notice.value = '密码已修改。其它设备上的登录都已经失效'
   } catch (e) {
-    error.value = e instanceof ApiError ? e.message : '改口令失败'
+    error.value = e instanceof ApiError ? e.message : '修改密码失败'
   } finally {
     busy.value = false
   }
@@ -105,7 +105,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 
       <label class="field">
         <span class="lb">显示名</span>
-        <input v-model="form.display_name" placeholder="页面右上角显示的名字" />
+        <input v-model="form.display_name" />
       </label>
       <div class="foot">
         <button class="btn" :disabled="busy" @click="saveProfile">保存显示名</button>
@@ -114,13 +114,13 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
       <!-- 纯单点登录的账号没有本地口令，这一段整个不画：
            画出来点不动，只会让人以为是坏了 -->
       <template v-if="account && account.has_password">
-        <h4>改口令</h4>
+        <h4>修改密码</h4>
         <label class="field">
-          <span class="lb">旧口令</span>
+          <span class="lb">旧密码</span>
           <input v-model="form.old_password" type="password" autocomplete="current-password" />
         </label>
         <label class="field">
-          <span class="lb">新口令</span>
+          <span class="lb">新密码</span>
           <input v-model="form.new_password" type="password" autocomplete="new-password" />
         </label>
         <label class="field">
@@ -129,11 +129,11 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
         </label>
         <p class="hint">改完之后，其它设备上的登录会立刻失效。</p>
         <div class="foot">
-          <button class="btn primary" :disabled="busy" @click="changePassword">改口令</button>
+          <button class="btn primary" :disabled="busy" @click="changePassword">修改密码</button>
         </div>
       </template>
       <p v-else-if="account" class="hint">
-        这个账号只能走单点登录，没有本地口令。要加一个，找管理员。
+        这个账号只能走单点登录，没有本地密码。要加一个，找管理员。
       </p>
 
       <p v-if="error" class="err">{{ error }}</p>

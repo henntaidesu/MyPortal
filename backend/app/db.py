@@ -324,6 +324,24 @@ _DDL = [
         REFERENCES users (id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='门户当 IdP：卡片上登记的客户端'
     """,
+    """
+    CREATE TABLE IF NOT EXISTS card_grants (
+      -- 管理员把自己的一张单点登录卡片授权给别人（app/navstore.py 的 shared）。
+      -- item_id 是卡片的 client_id，理由同 proxy_cookies：不挂外键指向 nav_items。
+      -- 卡片删了 / 单点登录关了，这几行留着不删，读的时候连着 nav_items 一起看，
+      -- 再打开时授权还在（同 idp_clients.enabled 的路数）
+      owner_id   BIGINT UNSIGNED NOT NULL,
+      item_id    VARCHAR(64)     NOT NULL,
+      user_id    BIGINT UNSIGNED NOT NULL,
+      created_at TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (owner_id, item_id, user_id),
+      KEY idx_grant_user (user_id),
+      CONSTRAINT fk_grant_owner FOREIGN KEY (owner_id)
+        REFERENCES users (id) ON DELETE CASCADE,
+      CONSTRAINT fk_grant_user FOREIGN KEY (user_id)
+        REFERENCES users (id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='单点登录卡片授权给了谁'
+    """,
 ]
 
 

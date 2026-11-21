@@ -24,6 +24,12 @@ client_credentials / refresh_token：接进来的都是有后端的系统，用�
 client_id 只许字母、数字、`_`、`-`：access_token 是拿 `.` 拼起来的，
 client_id 里带点会让 userinfo 拆不开 token。
 
+## 谁能登进去
+
+卡片上登记的客户端，管理员都能用，**普通用户要那张卡片授权给了他**（`allowed`，
+授权在 card_grants 表，卡片编辑框里勾）。授权了的卡片会出现在他的页面上
+（app/navstore.py 的 `shared`）。conf.json 里登记的客户端没有卡片可授权，仍然谁都能用。
+
 ## 票据都长什么样
 
 - **授权码**：随机串，存在进程内的字典里，60 秒、只能换一次。授权码必须一次性
@@ -170,12 +176,34 @@ def client(client_id: str) -> Optional[dict]:
         return None
     with db.cursor() as cur:
         # 登记人必须**现在**还是启用中的管理员，见模块头
-        cur.execute("SELECT c.client_id, c.client_secret, c.name, c.redirect_uris "
+        cur.execute("SELECT c.client_id, c.client_secret, c.name, c.redirect_uris, "
+                    "c.owner_id, c.item_id "
                     "FROM idp_clients c JOIN users u ON u.id = c.owner_id "
                     "WHERE c.client_id = %s AND c.enabled = 1 "
                     "AND u.is_active = 1 AND u.role = 'admin'", (cid,))
         row = cur.fetchone()
-    return _row_to_client(row) if row else None
+    if not row:
+        return None
+    cli = _row_to_client(row)
+    # 卡片上登记的才有这两项，allowed() 拿它们去查授权
+    cli['owner_id'], cli['item_id'] = int(row['owner_id']), row['item_id']
+    return cli
+
+
+def allowed(cli: dict, user: dict) -> bool:
+    """这个人能不能用门户账号登进这个系统。
+
+    - conf.json 里登记的：谁都能，和以前一样（那边没有卡片，也就无从授权）；
+    - 管理员：都能，客户端本来就是管理员登记的；
+    - 普通用户：登记它的那张卡片得授权给了他（card_grants，卡片编辑框里勾）。
+      没授权的人页面上看不到那张卡片，但单点登录入口的地址能猜、能转发，这里还得拦一道。
+    """
+    if 'owner_id' not in cli or (user.get('role') or 'user') == 'admin':
+        return True
+    with db.cursor() as cur:
+        cur.execute('SELECT 1 FROM card_grants WHERE owner_id = %s AND item_id = %s '
+                    'AND user_id = %s', (cli['owner_id'], cli['item_id'], int(user['id'])))
+        return cur.fetchone() is not None
 
 
 # ---------------------------------------------------------------- 卡片上登记的客户端
@@ -389,12 +417,14 @@ def user_from_access(token: str) -> Optional[dict]:
         user_id, version, expires = int(parts[0]), int(parts[1]), int(parts[3])
     except ValueError:
         return None
-    if expires < time.time() or client(parts[2]) is None:
+    cli = client(parts[2])
+    if expires < time.time() or cli is None:
         return None
     row = _lookup(user_id)
     if row is None or not row['is_active'] or int(row['token_version']) != version:
         return None
-    return row
+    # 撤了授权之后，手里那枚 access_token 也当场不认，不用等它过期
+    return row if allowed(cli, row) else None
 
 
 def profile(user: dict) -> dict:

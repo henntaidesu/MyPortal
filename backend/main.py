@@ -20,8 +20,40 @@ Windows Terminal 之后 hide_console 是空转的：它靠 ShowWindow(GetConsole
 
 import 都写在函数里：窗口那套得在 import app.config 之前就建起来，
 不然启动失败的提示会落在一个还不存在的窗口里。
+
+比窗口还早的只有一件事：占住 onefile 的解压目录（`_hold_bundle`）。挂久了它会被系统清理
+掏空，理由见 [app/meipass_lock.py](app/meipass_lock.py)；窗口一起来就要读解压出来的 tcl/tk，
+所以得排在它前面。
 """
 import sys
+
+
+def _hold_bundle() -> tuple[int, int, bool]:
+    """占住解压目录、清掉上次强杀留下的残留，返回（占住几个文件, 清掉几份, 位置对不对）。
+
+    顺序不能换：清残留靠「改名失败 = 有实例占着文件」分辨死活，得先占住自己的。
+    这时候窗口还没起来，结果先攥着，等 `_report_bundle` 打进窗口。
+    出了岔子也不拦着启动——大不了回到没占住时的样子。
+    """
+    if not getattr(sys, 'frozen', False) or sys.platform != 'win32':
+        return 0, 0, True
+    try:
+        from app.meipass_lock import bundle_in_place, lock_bundle, sweep_stale
+        return lock_bundle(), sweep_stale(), bundle_in_place()
+    except Exception:
+        return 0, 0, True
+
+
+def _report_bundle(locked: int, swept: int, in_place: bool) -> None:
+    if locked:
+        print(f'[portal] 已占住解压目录里的 {locked} 个文件，系统清理删不掉: {sys._MEIPASS}')
+    if not in_place:
+        # 解压目录跟着工作目录跑了：残留清理会自己停手，但下次换个起始位置就又解到别处
+        print(f'[portal] !! 解压目录没落在 exe 旁边的 runtime 里，而是跟着当前工作目录跑了: '
+              f'{sys._MEIPASS} —— 多半是升级 PyInstaller 后 _PYI_ARCHIVE_FILE 没了，'
+              f'见 app/meipass_lock.py')
+    if swept:
+        print(f'[portal] 已清掉 {swept} 份上次没退干净留下的解压目录')
 
 
 def _start_window() -> bool:
@@ -49,7 +81,9 @@ def _hold_on_failure(message: str = '') -> None:
 
 
 def main() -> None:
+    bundle = _hold_bundle()
     windowed = _start_window()
+    _report_bundle(*bundle)
     try:
         from app.main import main as serve
         serve()

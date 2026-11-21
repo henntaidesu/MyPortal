@@ -132,8 +132,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
         <span class="or">或者把内容粘到下面</span>
       </div>
 
-      <textarea v-model="text" rows="7" spellcheck="false"
-                placeholder='{ "nav": { "groups": [ ... ] } }' @input="onPaste"></textarea>
+      <textarea v-model="text" rows="7" spellcheck="false" @input="onPaste"></textarea>
 
       <p v-if="error" class="err">{{ error }}</p>
 

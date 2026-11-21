@@ -65,10 +65,17 @@ if errorlevel 1 (
 )
 
 rem ===== 准备发布目录 =====
+rem Do NOT wipe the whole release dir: once Portal.exe has run from here, conf.json next to it
+rem holds that install's password and nav cards. Only the old exe is replaced.
 echo.
-echo [2/4] Cleaning and creating release dir %RELEASE% ...
-if exist "%RELEASE%" rmdir /s /q "%RELEASE%"
-mkdir "%RELEASE%"
+echo [2/4] Preparing release dir %RELEASE% ...
+if not exist "%RELEASE%" mkdir "%RELEASE%"
+if exist "%RELEASE%\Portal.exe" del /f /q "%RELEASE%\Portal.exe"
+if exist "%RELEASE%\Portal.exe" (
+    echo ERROR: cannot delete old Portal.exe, is it still running? Quit it from the tray first.
+    pause
+    exit /b 1
+)
 if exist "%ROOT%build" rmdir /s /q "%ROOT%build"
 
 rem ===== 构建前端 =====
@@ -111,12 +118,14 @@ if not exist "%RELEASE%\Portal.exe" (
     exit /b 1
 )
 
-rem ===== Release dir must contain Portal.exe and nothing else =====
+rem ===== The deliverable is Portal.exe alone =====
 rem The integration doc under docs\ is NOT copied here on purpose - send it
 rem to the other team straight from the repo.
 rem conf.json is not bundled and not copied from this machine either - it holds
 rem this install's password and nav data. Portal.exe creates it next to itself
 rem on first run and just keeps going; there is nothing to fill in.
+rem Anything else already in the release dir (conf.json, icons\, runtime\) was made by
+rem running Portal.exe from here and is kept on purpose; ship Portal.exe by itself.
 
 rem ===== 清理构建中间产物 =====
 if exist "%ROOT%build" rmdir /s /q "%ROOT%build"

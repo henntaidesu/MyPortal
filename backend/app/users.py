@@ -161,7 +161,7 @@ def create(username: str, password: Optional[str] = None, *,
     if role not in ROLES:
         raise ValueError(f'角色只能是 {" / ".join(ROLES)}')
     if password is not None and len(password) < 6:
-        raise ValueError('口令至少 6 位')
+        raise ValueError('密码至少 6 位')
     pw_hash = hash_password(password) if password is not None else None
 
     with db.cursor(write=True) as cur:
@@ -230,7 +230,7 @@ def set_password(user_id: int, password: Optional[str]) -> None:
     `password=None` 是「取消本地口令」，这个人以后只能走 OIDC。
     """
     if password is not None and len(password) < 6:
-        raise ValueError('口令至少 6 位')
+        raise ValueError('密码至少 6 位')
     pw_hash = hash_password(password) if password is not None else None
     with db.cursor(write=True) as cur:
         cur.execute('UPDATE users SET password_hash = %s, '

@@ -1,6 +1,7 @@
 <script setup>
-import { ref, watch, onMounted } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
 import NavGroup from './components/NavGroup.vue'
+import SharedGroup from './components/SharedGroup.vue'
 import CardDialog from './components/CardDialog.vue'
 import LoginView from './components/LoginView.vue'
 import AccountDialog from './components/AccountDialog.vue'
@@ -10,6 +11,7 @@ import ImportDialog from './components/ImportDialog.vue'
 import { state, removeItem, addGroup, removeGroup, boot, unbind } from './store'
 import { end as endDrag } from './drag'
 import { auth, refresh, logout } from './auth'
+import { colorOf } from './utils'
 
 const dialog = ref(null)   // { group, item } | null，item 为 null 表示新增
 
@@ -24,7 +26,18 @@ const dialog = ref(null)   // { group, item } | null，item 为 null 表示新�
 const panel = ref('')      // '' | 'account' | 'users' | 'import' | 'sso'
 const menu = ref(false)
 
+const name = computed(() => auth.user?.display_name || auth.user?.username || '')
+/* 头像取名字的第一个字。按码点切，emoji 打头时不会只切下半个代理对 */
+const avatar = computed(() => ([...name.value.trim()][0] || '?').toUpperCase())
+/* 配色按 username 取，不按显示名：改了显示名头像颜色不该跟着变 */
+const avatarColor = computed(() => colorOf(auth.user?.username))
+
 function closeMenu() {
+  menu.value = false
+}
+
+function openPanel(p) {
+  panel.value = p
   menu.value = false
 }
 
@@ -92,21 +105,63 @@ function onPageDrop() {
   <LoginView v-else-if="!auth.user" />
 
   <div v-else class="page" @dragover.prevent @drop.prevent="onPageDrop" @dragend="onPageDrop">
-    <div class="who" @click.stop>
-      <button class="whobtn" @click="menu = !menu">
-        {{ auth.user.display_name || auth.user.username }}
-        <span class="caret">▾</span>
+    <div class="who" @click.stop @keydown.esc="closeMenu">
+      <button class="whobtn" :class="{ open: menu }" :title="auth.user.username" @click="menu = !menu">
+        <span class="avatar" :style="{ background: avatarColor }">{{ avatar }}</span>
+        <span class="whoname">{{ name }}</span>
+        <svg class="caret" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg>
       </button>
-      <div v-if="menu" class="menu">
-        <button @click="panel = 'import'; menu = false">导入导航</button>
-        <button @click="panel = 'account'; menu = false">账号</button>
-        <button v-if="auth.user.is_admin" @click="panel = 'users'; menu = false">用户管理</button>
-        <button v-if="auth.user.is_admin" @click="panel = 'sso'; menu = false">单点登录</button>
-        <button class="out" @click="menu = false; logout()">退出登录</button>
-      </div>
+
+      <Transition name="pop">
+        <div v-if="menu" class="menu">
+          <div class="mhead">
+            <span class="avatar lg" :style="{ background: avatarColor }">{{ avatar }}</span>
+            <div class="mwho">
+              <div class="mname">{{ name }}</div>
+              <div class="msub">
+                <span v-if="auth.user.display_name && auth.user.display_name !== auth.user.username" class="uname">
+                  @{{ auth.user.username }}
+                </span>
+                <span class="role" :class="{ admin: auth.user.is_admin }">
+                  {{ auth.user.is_admin ? '管理员' : '普通用户' }}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div class="sep"></div>
+
+          <button @click="openPanel('import')">
+            <svg class="mi" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12" /><path d="m7 10 5 5 5-5" /><path d="M5 21h14" /></svg>
+            导入导航
+          </button>
+          <button @click="openPanel('account')">
+            <svg class="mi" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4" /><path d="M4 21a8 8 0 0 1 16 0" /></svg>
+            账号
+          </button>
+          <button v-if="auth.user.is_admin" @click="openPanel('users')">
+            <svg class="mi" viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3.5" /><path d="M2.5 20a6.5 6.5 0 0 1 13 0" /><path d="M16 4.5a3.5 3.5 0 0 1 0 7" /><path d="M18 14.2a6.5 6.5 0 0 1 3.5 5.8" /></svg>
+            用户管理
+          </button>
+          <button v-if="auth.user.is_admin" @click="openPanel('sso')">
+            <svg class="mi" viewBox="0 0 24 24" aria-hidden="true"><circle cx="7.5" cy="15.5" r="4.5" /><path d="m10.7 12.3 9.8-9.8" /><path d="m17 6 3 3" /><path d="m14.5 8.5 2 2" /></svg>
+            单点登录
+          </button>
+
+          <div class="sep"></div>
+
+          <button class="out" @click="menu = false; logout()">
+            <svg class="mi" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /><path d="m16 17 5-5-5-5" /><path d="M21 12H9" /></svg>
+            退出登录
+          </button>
+        </div>
+      </Transition>
     </div>
 
     <div class="groups">
+      <!-- 管理员授权过来的单点登录卡片，只读，排在最前面。没有就整块不画 -->
+      <SharedGroup />
+
       <NavGroup
         v-for="g in state.groups"
         :key="g.id"
@@ -148,48 +203,155 @@ function onPageDrop() {
   font-size: 13px;
 }
 
+/* 顶上多留的那 12px 是给右上角那颗按钮的：原来 36px 里塞不下 32px 高的按钮，
+   会压在第一个分类的边框上。只多 12px，不是多一整行 */
 .page {
-  padding: 36px;
+  position: relative;
+  padding: 48px 36px 36px;
 }
 
 /* 右上角那一小块。绝对定位而不是在 .groups 上面塞一行：
-   塞一行的话分类整体被往下推，一屏能看到的卡片就少一排 */
-.who { position: absolute; top: 14px; right: 18px; z-index: 20; }
+   塞一行的话分类整体被往下推，一屏能看到的卡片就少一排。
+   right 和 .page 的左右边距一样，按钮右沿和分类大卡右沿对齐 */
+.who { position: absolute; top: 8px; right: 36px; z-index: 20; }
 .whobtn {
   display: flex;
   align-items: center;
-  gap: 5px;
-  padding: 5px 10px;
-  font-size: 12.5px;
-  color: var(--text-2);
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
+  gap: 8px;
+  height: 32px;
+  padding: 0 10px 0 3px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  box-shadow: var(--shadow);
+  transition: background .15s, border-color .15s, box-shadow .15s;
 }
-.whobtn:hover { background: var(--surface); border-color: var(--border); }
-.caret { font-size: 9px; color: var(--text-3); }
+.whobtn:hover { background: var(--surface-hover); }
+.whobtn.open,
+.whobtn:focus-visible {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 18%, transparent);
+}
+.whoname {
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.caret {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: var(--text-3);
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform .18s;
+}
+.whobtn.open .caret { transform: rotate(180deg); }
+
+.avatar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  user-select: none;
+}
+.avatar.lg { width: 38px; height: 38px; font-size: 16px; }
+
 .menu {
   position: absolute;
   top: 100%;
   right: 0;
-  margin-top: 4px;
-  min-width: 128px;
-  padding: 4px;
+  margin-top: 8px;
+  width: 232px;
+  padding: 6px;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius);
   box-shadow: var(--shadow-lg);
+  transform-origin: top right;
 }
+.mhead { display: flex; align-items: center; gap: 10px; padding: 8px 8px 10px; }
+.mwho { min-width: 0; }
+.mname {
+  font-size: 14px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.msub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--text-3);
+}
+.uname { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.role {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 20px;
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-size: 11px;
+}
+.role.admin {
+  background: color-mix(in srgb, var(--primary) 15%, transparent);
+  color: var(--primary);
+}
+.sep { height: 1px; margin: 4px 2px; background: var(--border); }
+
 .menu button {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 10px;
   width: 100%;
-  padding: 7px 10px;
+  height: 34px;
+  padding: 0 10px;
   text-align: left;
   font-size: 13px;
   color: var(--text);
-  border-radius: 6px;
+  border-radius: 8px;
+  transition: background .12s, color .12s;
 }
 .menu button:hover { background: var(--surface-hover); }
+.mi {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  color: var(--text-3);
+  transition: color .12s;
+}
+.menu button:hover .mi { color: var(--text); }
 .menu .out { color: var(--danger); }
+.menu .out .mi,
+.menu .out:hover .mi { color: inherit; }
+.menu .out:hover { background: color-mix(in srgb, var(--danger) 12%, transparent); }
+
+.pop-enter-active,
+.pop-leave-active { transition: opacity .14s, transform .14s; }
+.pop-enter-from,
+.pop-leave-to { opacity: 0; transform: translateY(-4px) scale(.97); }
 
 .groups { display: flex; flex-direction: column; gap: 16px; }
 
@@ -213,6 +375,7 @@ function onPageDrop() {
 .plus { font-size: 20px; line-height: 1; }
 
 @media (max-width: 600px) {
-  .page { padding: 20px 16px; }
+  .page { padding: 48px 16px 20px; }
+  .who { right: 16px; }
 }
 </style>

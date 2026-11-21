@@ -49,8 +49,8 @@
 ## 这里不做
 
 - **不缓存**：转发的是人家系统的动态页面，缓存策略原样带回去，由浏览器认。
-- **不做「谁能访问哪台机器」这种细粒度授权**：卡片是谁的，谁就能通过它转发，
-  仅此而已。归属校验在 `_target()` 那一句里——查的是这个人自己的目标表，
+- **不做「谁能访问哪台机器」这种细粒度授权**：卡片是谁的，谁就能通过它转发；
+  管理员把单点登录卡片授权给了谁（app/navstore.py 的 `shared`），谁也能，仅此而已。归属校验在 `_target()` 那一句里——查的是这个人自己的目标表，
   不是先查全局表再比对 user_id（比对写法漏一次，就是拿到别人的卡片 id
   就能借门户往那台机器上打）。
 - **不改请求体**：GET 的查询串里那种「返回地址」会还原成上游的真实地址，
@@ -186,7 +186,7 @@ class Target(NamedTuple):
 # 完全可能撞上同一个 id（前端那个 uid() 是本机随机生成的）——按 id 直接查全局表
 # 的话，撞上就是「点我的卡片打开了别人那台机器」。
 _CACHE_TTL = 5.0
-_cache: dict[int, tuple[float, int, dict[str, Target]]] = {}
+_cache: dict[int, tuple[float, tuple[int, int], dict[str, Target]]] = {}
 
 
 def _targets(user_id: int) -> dict[str, Target]:
@@ -202,7 +202,8 @@ def _targets(user_id: int) -> dict[str, Target]:
     两道都要：只靠 TTL 的话，自己刚改完卡片地址、点进去还是老的，查起来很懵。
     """
     now = time.monotonic()
-    rev = navstore.revision(user_id)
+    # 授权过来的卡片在别人名下，它们的改动看全局那个计数
+    rev = (navstore.revision(user_id), navstore.shared_revision())
     hit = _cache.get(user_id)
     if hit and hit[0] > now and hit[1] == rev:
         return hit[2]
@@ -212,6 +213,13 @@ def _targets(user_id: int) -> dict[str, Target]:
         target = _to_target(item)
         if target:
             table[target.item_id] = target
+    # 管理员授权给这个人的单点登录卡片（navstore.shared）。归属校验的意思变成
+    # 「是你的卡片，或者授权给了你」，仍然只查这个人自己的那份名单。
+    # 自己的卡片先进表：id 撞上了（前端随机生成的，极少见）以自己那张为准
+    for item in navstore.shared(user_id):
+        target = _to_target(item)
+        if target:
+            table.setdefault(target.item_id, target)
 
     _cache[user_id] = (now + _CACHE_TTL, rev, table)
     return table

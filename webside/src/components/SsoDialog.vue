@@ -71,19 +71,13 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
       </label>
 
       <label class="field">
-        <span class="lb">门户地址<em>issuer，浏览器访问门户用的地址</em></span>
+        <span class="lb">门户地址</span>
         <div class="row">
-          <input v-model="form.issuer" spellcheck="false" @keyup.enter="save"
-            :placeholder="'留空按访问地址现拼：' + (info?.request_origin || '')" />
+          <input v-model="form.issuer" spellcheck="false" @keyup.enter="save" />
           <button v-if="info && form.issuer !== info.request_origin" type="button" class="btn"
             @click="form.issuer = info.request_origin">用当前地址</button>
         </div>
       </label>
-      <p class="hint">
-        各系统单点登录设置里的「门户地址」必须和它<strong>一字不差</strong>（http/https、端口、末尾不带 /）。
-        门户同时有内网、公网两个地址时一定要填，填浏览器实际打开的那个。
-        <template v-if="info">现在生效的是 <code>{{ info.effective_issuer }}</code>。</template>
-      </p>
 
       <p v-if="error" class="err">{{ error }}</p>
       <p v-if="notice" class="ok">{{ notice }}</p>
@@ -149,12 +143,10 @@ h4 { margin: 22px 0 10px; font-size: 14px; }
   font-size: 12px;
   color: var(--text-2);
 }
-.lb em { font-style: normal; font-size: 11px; color: var(--text-3); }
 .row { display: flex; gap: 8px; }
 .row input { flex: 1; min-width: 0; }
 .row .btn { flex: none; height: 38px; }
 .hint { margin: 8px 0 0; color: var(--text-3); font-size: 12px; line-height: 1.55; }
-.hint strong { color: var(--text-2); }
 code {
   padding: 0 4px;
   border-radius: 4px;

@@ -64,6 +64,13 @@ export const sync = reactive({
   saving: false          // 正在往后端写
 })
 
+/**
+ * 管理员授权给我的单点登录卡片（后端 navstore.shared）。**不放进 state**：
+ * state 整份会被 push() 推回去、被自动保存盯着，放进去等于把别人的卡片
+ * 存成自己的一份拷贝。也不进本机缓存——它是只读的，跟着每次 pull() 刷新。
+ */
+export const shared = reactive([])
+
 function readLocal() {
   try {
     const raw = localStorage.getItem(navKey())
@@ -124,6 +131,8 @@ async function push() {
 async function pull() {
   const res = await api('/api/nav')
   sync.offline = false
+  const list = Array.isArray(res.shared) ? res.shared : []
+  shared.splice(0, shared.length, ...list.map((i) => ({ ...normalizeItem(i), owner: i.owner || '' })))
   return res.data
 }
 
@@ -197,14 +206,10 @@ function normalize(data) {
   }
 }
 
+/* 新账号给一个空分类，一张卡片都不带：卡片由他自己加，或者管理员授权过来（shared）。
+   留一个空分类而不是什么都没有：有它才有「添加导航」那个格子，进来就知道往哪儿点 */
 function defaultGroups() {
-  return [normalizeGroup({
-    name: '常用',
-    items: [
-      { name: 'GitHub', url: 'https://github.com', desc: '代码托管' },
-      { name: 'Vue 文档', url: 'https://cn.vuejs.org', desc: '官方文档' }
-    ]
-  })]
+  return [normalizeGroup({ name: DEFAULT_GROUP, items: [] })]
 }
 
 export const state = reactive(normalize(null))
@@ -242,6 +247,7 @@ async function reconcile(cached) {
   try {
     if (cached && isDirty()) {
       await push()                     // 上回没推成（或者推到一半关了页面），本机这份更新
+      await pull()                     // 只为了拿 shared；data 就是刚推上去的那份，不用再 apply
       return
     }
     const remote = await pull()
@@ -255,7 +261,7 @@ async function reconcile(cached) {
       await push()                     // 本机这份搬上去，这是一次性的迁移
       writeLocal()
     } else {
-      apply(normalize(null))           // 全新的：给一个示例分类，改了之后自然会推上去
+      apply(normalize(null))           // 全新的：给一个空分类，改了之后自然会推上去
     }
   } catch (e) {
     sync.offline = true
@@ -276,6 +282,7 @@ export function unbind() {
   sync.offline = false
   sync.saving = false
   state.groups.splice(0, state.groups.length)
+  shared.splice(0, shared.length)
   state.title = DEFAULT_TITLE
 }
 

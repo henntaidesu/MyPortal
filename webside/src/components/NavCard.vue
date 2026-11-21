@@ -3,7 +3,11 @@ import { computed } from 'vue'
 import NavIcon from './NavIcon.vue'
 import { getHost, proxyUrl } from '../utils'
 
-const props = defineProps({ item: { type: Object, required: true } })
+const props = defineProps({
+  item: { type: Object, required: true },
+  /* 管理员授权过来的卡片：不是自己的，没有编辑 / 删除 */
+  readonly: { type: Boolean, default: false }
+})
 const emit = defineEmits(['edit', 'remove'])
 
 const host = computed(() => getHost(props.item.url))
@@ -38,7 +42,7 @@ const hint = computed(() => {
       </div>
       <div class="desc">{{ item.desc || host }}</div>
     </div>
-    <span class="acts" @click.prevent.stop>
+    <span v-if="!readonly" class="acts" @click.prevent.stop>
       <span class="act" title="编辑" @click="emit('edit', item)">✎</span>
       <span class="act danger" title="删除" @click="emit('remove', item)">✕</span>
     </span>

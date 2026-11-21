@@ -28,6 +28,12 @@
 删光再插一遍，全在一个事务里。不做逐条 diff：这一页是自己给自己看的东西，
 一棵树撑死几百行，diff 省下的那点写入量换不回它带来的一堆边界情况
 （拖拽同时改名、换分类再改回来……）。冲突仍然是后写的盖先写的。
+
+## 授权过来的卡片不进这棵树
+
+管理员可以把自己的单点登录卡片授权给别人（`card_grants` 表，`shared` / `set_grants`）。
+被授权的人看到的是**那张卡片本身**，不是一份拷贝：不进他的 nav_groups / nav_items，
+他存导航时也不会把它写进去，管理员改了地址他那边跟着变，撤了授权就没了。
 """
 import json
 import time
@@ -51,9 +57,22 @@ _GROUP_COLUMNS = ('id', 'name', 'items')
 # 跨进程那点延迟由那边的 TTL 兜着
 _revision: dict[int, int] = {}
 
+# 全局的那一份：谁存了导航、谁改了授权都 +1。授权过来的卡片在**别人**名下，
+# 管理员改了它的地址，被授权那个人的代理目标表也得跟着失效（app/proxy.py）
+_shared_revision = 0
+
 
 def revision(user_id: int) -> int:
     return _revision.get(user_id, 0)
+
+
+def shared_revision() -> int:
+    return _shared_revision
+
+
+def _bump_shared() -> None:
+    global _shared_revision
+    _shared_revision += 1
 
 
 # ---------------------------------------------------------------- 校验
@@ -230,6 +249,9 @@ def save(user_id: int, data: dict) -> int:
     # 开着 Cookie 代理的卡片。存完之后除了这些，别的罐子一律收掉（见 cookiejar.retain）
     with_jar = {str(i.get('id') or '') for g in groups
                 for i in (g.get('items') or []) if i.get('cookieJar')}
+    # 别人授权过来的卡片不在这棵树里，但罐子钉在 (这个人, 那张卡片) 上。
+    # 不算进来的话他每存一次导航，那几张卡片的登录态就被清一次
+    with_jar |= {i['id'] for i in shared(user_id) if i.get('cookieJar')}
     # 开着「单点登录」的卡片。它们登记的 IdP 客户端才算数（见 idp.sync）
     with_sso = {str(i.get('id') or '') for g in groups
                 for i in (g.get('items') or []) if i.get('sso')}
@@ -282,7 +304,78 @@ def save(user_id: int, data: dict) -> int:
         idp.sync(cur, user_id, with_sso)
 
     _revision[user_id] = _revision.get(user_id, 0) + 1
+    _bump_shared()
     return int(time.time())
+
+
+# ---------------------------------------------------------------- 授权给别人的卡片
+
+def shared(user_id: int) -> list[dict]:
+    """管理员授权给这个人的单点登录卡片：完整的卡片字典，外加 `owner`（授权人的显示名）。
+
+    三条都成立才算：授权人**现在**还是启用中的管理员（同 idp.client 的路数，被降级的
+    管理员发出去的授权当场作废）、那张卡片还在、卡片上的单点登录还开着。
+    后两条不成立时授权行留着不删，见 card_grants 表上的说明。
+
+    两处用它：/api/nav 带回去画在页面上；app/proxy.py 拿它补进这个人的代理目标表——
+    这类卡片多半开着门户代理，单点登录入口就在 /api/proxy/<那张卡片 id>/ 底下，
+    不补的话被授权的人一点开就是 404。
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT i.group_id, i.client_id, i.name, i.url, i.descr, i.icon, i.proxy, i.extra, "
+            "u.username, u.display_name "
+            "FROM card_grants g "
+            "JOIN users u ON u.id = g.owner_id AND u.is_active = 1 AND u.role = 'admin' "
+            "JOIN nav_items i ON i.user_id = g.owner_id AND i.client_id = g.item_id "
+            "WHERE g.user_id = %s AND g.owner_id <> %s ORDER BY i.name, i.id",
+            (user_id, user_id))
+        rows = cur.fetchall()
+    out = []
+    for row in rows:
+        item = _row_to_item(row)
+        if item.get('sso'):
+            item['owner'] = row['display_name'] or row['username']
+            out.append(item)
+    return out
+
+
+def grants(owner_id: int, item_id: str) -> list[int]:
+    """这张卡片授权给了谁（用户 id）。卡片编辑框读回来用。"""
+    with db.cursor() as cur:
+        cur.execute('SELECT user_id FROM card_grants WHERE owner_id = %s AND item_id = %s',
+                    (owner_id, item_id))
+        return sorted(int(r['user_id']) for r in cur.fetchall())
+
+
+def set_grants(owner_id: int, item_id: str, user_ids: list[int]) -> list[int]:
+    """整份换掉这张卡片的授权名单，返回换完的。不存在的用户 id 和授权人自己悄悄丢掉。
+
+    被撤掉的人在这张卡片上的 Cookie 罐子一并收掉：撤授权的本意就是「别再让他用」，
+    罐子留着的话，哪天再授权回来他直接就是登录状态。他自己名下恰好有张同 id 的
+    卡片时不动——那个罐子是他自己那张卡片的。
+    """
+    wanted = {int(u) for u in user_ids or []} - {owner_id}
+    with db.cursor(write=True) as cur:
+        if wanted:
+            marks = ', '.join(['%s'] * len(wanted))
+            cur.execute(f'SELECT id FROM users WHERE id IN ({marks})', tuple(wanted))
+            wanted = {int(r['id']) for r in cur.fetchall()}
+        cur.execute('SELECT user_id FROM card_grants WHERE owner_id = %s AND item_id = %s',
+                    (owner_id, item_id))
+        before = {int(r['user_id']) for r in cur.fetchall()}
+        for uid in before - wanted:
+            cur.execute('DELETE FROM card_grants WHERE owner_id = %s AND item_id = %s '
+                        'AND user_id = %s', (owner_id, item_id, uid))
+            cur.execute('DELETE FROM proxy_cookies WHERE user_id = %s AND item_id = %s '
+                        'AND NOT EXISTS (SELECT 1 FROM nav_items '
+                        'WHERE user_id = %s AND client_id = %s)', (uid, item_id, uid, item_id))
+        if wanted - before:
+            cur.executemany('INSERT INTO card_grants (owner_id, item_id, user_id) '
+                            'VALUES (%s, %s, %s)',
+                            [(owner_id, item_id, uid) for uid in wanted - before])
+    _bump_shared()
+    return sorted(wanted)
 
 
 # ---------------------------------------------------------------- 老数据

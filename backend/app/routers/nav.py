@@ -22,11 +22,22 @@ class NavIn(BaseModel):
     data: dict[str, Any]
 
 
+# 授权过来的卡片只下发画卡片用得上的这几项。proxyHosts、cookieJar 这些是
+# 管理员那张卡片的配置，被授权的人改不了，也用不着知道
+_SHARED_FIELDS = ('id', 'name', 'url', 'desc', 'icon', 'proxy', 'sso', 'ssoLogin', 'owner')
+
+
 @router.get('')
 def get_nav(user: dict = Depends(require_login)):
-    """这个账号还没配过就返回 data = null，前端会把本机缓存那份推上来。"""
-    data, updated_at = navstore.load(int(user['id']))
-    return {'data': data, 'updated_at': updated_at}
+    """这个账号还没配过就返回 data = null，前端会把本机缓存那份推上来。
+
+    `shared` 是管理员授权给他的单点登录卡片（navstore.shared），**不在 data 里**：
+    放进 data 的话前端存导航时会把它当成自己的卡片写回去，变成一份拷贝。
+    """
+    user_id = int(user['id'])
+    data, updated_at = navstore.load(user_id)
+    shared = [{k: item.get(k) for k in _SHARED_FIELDS} for item in navstore.shared(user_id)]
+    return {'data': data, 'updated_at': updated_at, 'shared': shared}
 
 
 @router.get('/legacy')

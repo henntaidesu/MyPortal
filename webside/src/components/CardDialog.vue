@@ -47,6 +47,18 @@ const idp = reactive({
   uris: ''               // 一行一个
 })
 
+/* ---- 授权给谁（用户 id）：被授权的人页面上多出这张卡片（只读），也只有他们和管理员
+   能用门户账号登进这个系统（app/idp.py 的 allowed）。跟着客户端登记一起存，见 submit ---- */
+const grants = ref([])
+const grantsLoaded = ref(false)   // 没读到就别往回写，不然一次保存会把已有的授权清空
+const people = ref([])            // 除了自己以外的所有账号
+
+function toggleGrant(id) {
+  const i = grants.value.indexOf(id)
+  if (i > -1) grants.value.splice(i, 1)
+  else grants.value.push(id)
+}
+
 async function loadIdp() {
   if (!isAdmin.value) return
   try {
@@ -58,10 +70,18 @@ async function loadIdp() {
       idp.uris = res.client.redirect_uris.join('\n')
       idp.secretSet = res.client.secret_set
     }
+    grants.value = res.grants || []
+    grantsLoaded.value = true
   } catch {
     // 问不到就当没登记过，保存时照样能登记
   }
   idp.loaded = true
+  try {
+    const res = await api('/api/users')
+    people.value = res.users.filter((u) => u.id !== auth.user.id)
+  } catch {
+    // 拿不到名单就不画那一栏的选项，授权维持原样
+  }
 }
 
 /* 打开提供方总开关（存在库里，即刻生效）。门户地址没设过的话顺手按当前访问地址填上——
@@ -163,7 +183,9 @@ async function submit() {
         const res = await api('/api/idp/cards/' + encodeURIComponent(cardId), {
           method: 'PUT',
           body: { client_id: idp.clientId.trim(), name: form.name.trim(),
-                  redirect_uris: uriList.value, client_secret: idp.secret.trim() }
+                  redirect_uris: uriList.value, client_secret: idp.secret.trim(),
+                  // undefined 会被 JSON 丢掉 = 后端不动授权名单
+                  grants: grantsLoaded.value ? grants.value : undefined }
         })
         idp.secretSet = !!res.client?.secret_set
       } catch (e) {
@@ -215,12 +237,12 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 
       <label class="field">
         <span class="lb">名称</span>
-        <input ref="nameInput" v-model="form.name" placeholder="例如：GitHub" @keyup.enter="submit" />
+        <input ref="nameInput" v-model="form.name" @keyup.enter="submit" />
       </label>
 
       <label class="field">
         <span class="lb">地址</span>
-        <input v-model="form.url" placeholder="例如：https://github.com" @keyup.enter="submit" />
+        <input v-model="form.url" @keyup.enter="submit" />
       </label>
 
       <!-- 开启之后这张卡片点开的是 /api/proxy/<id>，由门户那个进程转出去。
@@ -265,7 +287,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
            （app/proxy_webside/），这里填的是补充：图或接口在别的域名上、又没内置时才要填 -->
       <label v-if="form.proxy === 'site'" class="field">
         <span class="lb">额外域名<em>可选</em></span>
-        <input v-model="form.proxyHosts" placeholder="逗号隔开，例如：example-cdn.com" @keyup.enter="submit" />
+        <input v-model="form.proxyHosts" @keyup.enter="submit" />
       </label>
 
       <!-- 开了之后点卡片先去那个系统的「门户登录」入口，回来就是登录状态；关着就直接打开地址。
@@ -297,15 +319,13 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
         <template v-if="isAdmin">
           <label class="field">
             <span class="lb">回调地址<HintTip>一行一个，与那个系统的回调地址逐字比对。</HintTip></span>
-            <textarea v-model="idp.uris" rows="2" spellcheck="false"
-              placeholder="例如：https://freemm.makurochan.com/mercariV2/src/use_web/sso/callback"></textarea>
+            <textarea v-model="idp.uris" rows="2" spellcheck="false"></textarea>
           </label>
 
           <label class="field">
             <span class="lb">Client ID</span>
             <div class="row">
-              <input v-model="idp.clientId" spellcheck="false" placeholder="字母、数字、_ 和 -"
-                @keyup.enter="submit" />
+              <input v-model="idp.clientId" spellcheck="false" @keyup.enter="submit" />
               <button type="button" class="btn" @click="copy(idp.clientId, 'id')">
                 {{ copied === 'id' ? '已复制' : '复制' }}
               </button>
@@ -313,10 +333,11 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
           </label>
 
           <label class="field">
-            <span class="lb">Client Secret</span>
+            <!-- 「已设置」放在标题上而不是输入框里：框里不放提示文本，
+                 而存过的密钥不再下发，框是空的，不标一句会以为还没配 -->
+            <span class="lb">Client Secret<em v-if="idp.secretSet && !idp.secret">已设置，留空不改</em></span>
             <div class="row">
-              <input v-model="idp.secret" spellcheck="false"
-                :placeholder="idp.secretSet ? '已设置，留空不改' : '至少 32 个字符'" @keyup.enter="submit" />
+              <input v-model="idp.secret" spellcheck="false" @keyup.enter="submit" />
               <button v-if="idp.secret" type="button" class="btn" @click="copy(idp.secret, 'secret')">
                 {{ copied === 'secret' ? '已复制' : '复制' }}
               </button>
@@ -327,19 +348,31 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 
         <label class="field">
           <span class="lb">登录入口<em v-if="isAdmin">可选</em></span>
-          <input v-model="form.ssoLogin" spellcheck="false" @keyup.enter="submit"
-            :placeholder="derivedLogin ? '留空：' + derivedLogin : '那个系统的「门户登录」地址'" />
+          <input v-model="form.ssoLogin" spellcheck="false" @keyup.enter="submit" />
         </label>
+
+        <div v-if="isAdmin" class="field">
+          <span class="lb">授权给<em v-if="grants.length">{{ grants.length }} 人</em></span>
+          <div class="chips">
+            <button v-for="u in people" :key="u.id" type="button" class="chip"
+              :class="{ on: grants.includes(u.id), off: !u.is_active }"
+              :title="u.username" @click="toggleGrant(u.id)">
+              <svg v-if="grants.includes(u.id)" viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 8.5 3 3 6-7" /></svg>
+              {{ u.display_name }}
+            </button>
+            <span v-if="!people.length" class="none">还没有别的用户</span>
+          </div>
+        </div>
       </template>
 
       <label class="field">
         <span class="lb">描述<em>可选</em></span>
-        <input v-model="form.desc" placeholder="一句话写清这是什么" @keyup.enter="submit" />
+        <input v-model="form.desc" @keyup.enter="submit" />
       </label>
 
       <label class="field">
         <span class="lb">图标<em>可选</em></span>
-        <input v-model="form.icon" placeholder="图片地址，留空自动抓取" @keyup.enter="submit" />
+        <input v-model="form.icon" @keyup.enter="submit" />
       </label>
 
       <p v-if="error" class="err">{{ error }}</p>
@@ -422,6 +455,47 @@ h3 { margin: 0 0 16px; font-size: 16px; }
 .row .btn { flex: none; height: 38px; }
 
 .field { display: block; margin-top: 12px; }
+
+/* 授权给谁：一个人一颗，点一下切换。外框和输入框同一个底色，一列对齐下来还是「标题 + 一个控件」 */
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  padding: 0 12px;
+  font-size: 13px;
+  color: var(--text-2);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  transition: background .12s, border-color .12s, color .12s;
+}
+.chip:hover { border-color: var(--primary); }
+.chip.on {
+  color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 16%, transparent);
+  border-color: var(--primary);
+}
+.chip.off { opacity: .5; }        /* 已停用的账号：授权留着，但他现在登不进门户 */
+.chip svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.chips .none { padding: 4px; font-size: 12px; color: var(--text-3); }
 .lb {
   position: relative;      /* HintTip 的浮层按它摆，宽度与这一栏相同 */
   display: flex;
@@ -433,7 +507,6 @@ h3 { margin: 0 0 16px; font-size: 16px; }
 }
 /* 「可选」跟在标题后面，浅一档，跟必填栏一眼分得开 */
 .lb em { font-style: normal; font-size: 11px; color: var(--text-3); }
-.dialog input::placeholder { color: var(--text-3); }
 .err { color: var(--danger); font-size: 13px; margin: 12px 0 0; }
 .foot { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
 @keyframes fade { from { opacity: 0 } }

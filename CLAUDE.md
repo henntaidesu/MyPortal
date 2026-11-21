@@ -12,7 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 或者只有门户这台够得着的站点）。
 
 **数据在 MySQL 里，配置在 `backend/conf.json` 里，两者不混。**
-库里五张表（另有 `proxy_cookies`、`idp_clients`）：`users`（账号和口令哈希）、`user_identities`（OIDC 绑定）、
+库里五张表（另有 `proxy_cookies`、`idp_clients`、`card_grants`）：`users`（账号和口令哈希）、`user_identities`（OIDC 绑定）、
 `nav_prefs` / `nav_groups` / `nav_items`（每人一份的导航），外加一张
 `portal_meta` 放签名密钥和迁移标记。conf.json 只剩连接串、监听地址、OIDC 参数。
 
@@ -192,6 +192,15 @@ conf.json 的 `idp.clients`（启动时读），和**卡片编辑框里登记的
 - **client_id 不许带 `.`**：access_token 是 `<用户>.<版本>.<client_id>.<过期>.<签名>`，带点 userinfo 就拆不开了。
 - 新卡片的 id 在编辑框里先生成（`addItem` 认 `payload.id`）：登记客户端要在卡片落进 state 之前用它；
   登记失败编辑框不关，免得卡片说「走单点登录」而门户不认。
+- **卡片可以授权给别人**（编辑框「授权给」那一栏，`card_grants` 表，跟着 `PUT /api/idp/cards/<id>`
+  一起存）。被授权的人页面最上面多一块只读的「授权给我的」（[SharedGroup.vue](webside/src/components/SharedGroup.vue)），
+  数据是 `/api/nav` 回的 `shared`，**不在 `data` 里、不进 store.js 的 `state`**——进了就会被自动保存
+  当成他自己的卡片写回去，变成一份拷贝。管理员改地址他那边跟着变，撤授权 / 关单点登录 / 删卡片 /
+  授权人被降级，卡片就没了（授权行留着，同 `idp_clients.enabled` 的路数）。
+- **普通用户只能登进授权给他的系统**（`idp.allowed`，授权端点和 userinfo 都查）；管理员都能，
+  conf.json 里登记的客户端谁都能。没授权时停在门户报错页，不带 `access_denied` 跳回去。
+- 授权过来的卡片多半开着门户代理，所以 proxy.py 的 `_targets` 把 `navstore.shared` 也收进
+  这个人的目标表（自己的卡片优先），目标表缓存的失效计数多了一个全局的 `shared_revision`。
 
 - **授权码存在进程内字典里，60 秒、一次性**——全仓库唯一一处服务端存票，因为签名串做不到一次性。
 - **access_token 带 token_version**，改口令 / 停用 / 踢下线后 userinfo 当场不认。
@@ -236,8 +245,11 @@ conf.json 的 `idp.clients`（启动时读），和**卡片编辑框里登记的
   一个人的门户不需要「我是谁」，多个人的必须有，不然同一台电脑上换了个人登，
   看着一模一样的页面，改了半天才发现改的是别人那份。它是绝对定位的，
   不占 `.groups` 上面一行——占一行的话一屏能看到的卡片就少一排。
-  （卡片表单的 label 和 placeholder 一度也被去掉，后来按要求加回来了：
-  编辑态字段是填好的，placeholder 顶不上来，只剩 label 认得出哪栏是哪栏。）
+  （卡片表单的 label 一度也被去掉，后来按要求加回来了：编辑态字段是填好的，
+  只剩 label 认得出哪栏是哪栏。**所有输入框都不放 placeholder**，这是按要求逐个去掉的；
+  非说不可的状态写在 label 后面的 `<em>` 里，比如 Client Secret 的「已设置，留空不改」。）
+- **新账号一张卡片都不带**：`normalize(null)` 给的是一个空的「我的导航」分类，
+  不是示例卡片。卡片由他自己加，或者管理员授权过来（见门户当 IdP 那一节）。
 - **`nav.title` 页面上不显示了，但照样读进来、照样写回去**：谁在 conf.json 里手写了
   一个标题，不该被下一次存导航悄悄抹掉。`state.theme` 同理（没有切换按钮了，
   但 `applyTheme` 照常跟着它走，默认 auto = 跟随系统）。
@@ -340,7 +352,8 @@ conf.json 的 `idp.clients`（启动时读），和**卡片编辑框里登记的
   同名的会互相顶掉。内网里另一台机器要转的话，把它填进卡片的「额外域名」。
 - 直接转发模式只认卡片自己那台机器，地址里塞不进主机名（老形状的链接继续认）。
 - 两种模式都只转 http/https（卡片填 `ssh://` 的也有，那种转不了）。
-- **要登录，而且要是「这张卡片的主人」。** 归属校验就是 `_target(user_id, item_id)`
+- **要登录，而且要是「这张卡片的主人」，或者管理员把这张单点登录卡片授权给了他。**
+  归属校验就是 `_target(user_id, item_id)`
   那一句：查的是 `_targets(user_id)` 这张**按人建的**表，不是先查全局表再比对 user_id。
   比对写法只要哪天多一条取卡片的路就漏一次，而漏一次的后果是「拿到别人的卡片 id
   就能借门户往那台机器上打」。多用户之后卡片 id 不再全局唯一（前端那个 `uid()`
@@ -542,7 +555,7 @@ conf.json 的 `idp.clients`（启动时读），和**卡片编辑框里登记的
 ## 打包成 exe
 
 `pyinstaller.bat` + [portal.spec](portal.spec)，产物是单文件 `Releases\<版本>\Portal.exe`，
-发布目录里**只有这一个文件**。入口是 [backend/main.py](backend/main.py)，**没有子命令**：
+交付的**只有这一个文件**。入口是 [backend/main.py](backend/main.py)，**没有子命令**：
 双击就是起服务。
 
 图标三处同一张：exe 图标、托盘图标、运行窗口图标都用门户网页的 favicon
@@ -587,6 +600,7 @@ exe 打成 **windowed（`console=False`）**：双击不弹 CMD 黑框，起来�
   所以 exe 跑起来之后发布目录里会多出 `conf.json` 和 `icons/`，这是正常的。
 - **前端打进 exe**（解压在 `_MEIPASS/webside`），但 exe 同级放一个 `webside` 目录就能盖掉它，
   换前端不用重新打包。
+- **解压目录不能在 `%TEMP%`**，见下一节。
 - **spec 里用 `SPECPATH` 定位项目根，不要用 `os.getcwd()`**：从别的目录调起来会算错，
   表现成「前端悄悄没打进 exe」。dist 不存在时 spec 直接 `SystemExit`，不留只警告的余地——
   少了前端的 exe 照样能跑，只是首页一片空，到现场才发现就晚了。
@@ -603,4 +617,25 @@ exe 打成 **windowed（`console=False`）**：双击不弹 CMD 黑框，起来�
   不报错，只是每次进外部站点都要重登。
 - 脚本自己就叫 `pyinstaller.bat`，所以里面必须写 `python -m PyInstaller`——
   裸写 `pyinstaller` 会被 cmd 解析成这个脚本本身，死循环。
-- **发布目录只放 Portal.exe**：`conf.json` 不从本机拷，那里面是这台机器自己的口令和数据。
+- **交付只给 Portal.exe**：`conf.json` 不从本机拷，那里面是这台机器自己的口令和数据。
+  脚本重打时**只替换旧 exe，不清空发布目录**——在那里跑过的话，旁边的 `conf.json` 就是那份安装的
+  口令和导航卡片，整个删掉等于把它们一起删了。exe 还在运行时删不掉，脚本会报错停下，先从托盘退出。
+
+### 解压目录不能在 %TEMP%
+
+onefile 每次启动把 DLL、前端 webside、tcl/tk、certifi 的 `cacert.pem` 等解压到 `_MEIxxxx` 再跑。默认在
+`%TEMP%`，而存储感知 / 磁盘清理会删掉 `%TEMP%` 里放了约 7 天的文件，门户挂着跑一周就被掏空：首页没了、
+出站 HTTPS（图标、OIDC）找不到 CA 证书包、晚加载的模块 import 失败，进程和托盘图标却都还在。
+
+现在是三层，理由都在 [meipass_lock.py](backend/app/meipass_lock.py) 的 docstring：spec 的 `runtime_tmpdir`
+解压到 **exe 同级的 `runtime\`**（所以跑起来之后发布目录里除了 `conf.json`、`icons/` 还会多一个 `runtime/`，
+正常退出时里面是空的）；[backend/main.py](backend/main.py) 第一件事 `_hold_bundle()`——比运行窗口还早，
+窗口要读解压出来的 tcl/tk——先 `lock_bundle()` 给每个文件开只读句柄持有到退出（别的进程删不掉），
+再 `sweep_stale()` 清掉强杀 / 断电留下的 `_MEI*`。**顺序别换**：清残留靠「改名失败 = 有实例占着文件」
+分辨死活，得先占住自己的。spec 里那个目录名和 `meipass_lock._RUNTIME_DIR_NAME` 要一致。
+
+`runtime_tmpdir` 写的是 `%_PYI_ARCHIVE_FILE%\..\runtime`，不是 `runtime`：相对路径按的是**当前工作目录**
+而不是 exe 所在目录（实测），开机自启或快捷方式改了起始位置就解到别处去了。`_PYI_ARCHIVE_FILE` 是
+引导程序放 exe 路径的**内部变量**（PyInstaller 6.22 实测可用，文档里没有）：升级 PyInstaller 后要看一眼
+运行窗口，出现「!! 解压目录没落在 exe 旁边」就是它没了，此时残留清理也会自动停手。
+exe 所在目录必须可写（`conf.json`、`icons/` 本来就要求这一点），别放进 Program Files。

@@ -61,10 +61,10 @@ def change_password(body: PasswordIn, response: Response,
     if row is None:
         raise HTTPException(401, '未登录')
     if row.get('password_hash') is None:
-        raise HTTPException(400, '这个账号没有本地口令，只能走单点登录；'
+        raise HTTPException(400, '这个账号没有本地密码，只能走单点登录；'
                                  '要加一个请找管理员')
     if not users.check_password(row['password_hash'], body.old_password):
-        raise HTTPException(400, '旧口令不对')
+        raise HTTPException(400, '旧密码不对')
     try:
         users.set_password(int(user['id']), body.new_password)
     except ValueError as exc:
