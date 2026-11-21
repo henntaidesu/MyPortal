@@ -48,16 +48,47 @@ const idp = reactive({
   uris: ''               // 一行一个
 })
 
-/* ---- 授权给谁（用户 id）：被授权的人页面上多出这张卡片（只读），也只有他们和管理员
-   能用门户账号登进这个系统（app/idp.py 的 allowed）。跟着客户端登记一起存，见 submit ---- */
-const grants = ref([])
-const grantsLoaded = ref(false)   // 没读到就别往回写，不然一次保存会把已有的授权清空
+/* ---- 分享给谁（用户 id），只有管理员看得到。被分享的人页面上多出这张卡片（只读），
+   卡片的配置全照这一张走，登录却是他自己的：Cookie 代理存的是他自己的罐子，
+   单点登录认的是他自己的门户账号（app/navstore.py 的 shared、app/idp.py 的 allowed）。
+   名单单独存在 /api/nav/shares，不跟着导航走：导航那棵树会进 localStorage、整份推来推去，
+   而名单是这张卡片「给别人」的东西 ---- */
+const shares = ref([])
+const sharesLoaded = ref(false)   // 没读到就别往回写，不然一次保存会把已有的分享清空
+let sharesBefore = []             // 打开时读到的那份，没变就不往回写
 const people = ref([])            // 除了自己以外的所有账号
 
-function toggleGrant(id) {
-  const i = grants.value.indexOf(id)
-  if (i > -1) grants.value.splice(i, 1)
-  else grants.value.push(id)
+function toggleShare(id) {
+  const i = shares.value.indexOf(id)
+  if (i > -1) shares.value.splice(i, 1)
+  else shares.value.push(id)
+}
+
+function sharesChanged() {
+  if (!sharesLoaded.value) return false
+  const before = new Set(sharesBefore)
+  return shares.value.length !== before.size || shares.value.some((id) => !before.has(id))
+}
+
+async function loadShares() {
+  if (!isAdmin.value) return
+  try {
+    // 新卡片还没分享给过谁，不用问
+    if (props.item?.id) {
+      const res = await api('/api/nav/shares/' + encodeURIComponent(cardId))
+      shares.value = res.users || []
+    }
+    sharesBefore = [...shares.value]
+    sharesLoaded.value = true
+  } catch {
+    // 问不到就不画那一栏，分享名单维持原样
+  }
+  try {
+    const res = await api('/api/users')
+    people.value = res.users.filter((u) => u.id !== auth.user.id)
+  } catch {
+    // 拿不到名单就不画那一栏的选项，分享维持原样
+  }
 }
 
 async function loadIdp() {
@@ -71,18 +102,10 @@ async function loadIdp() {
       idp.uris = res.client.redirect_uris.join('\n')
       idp.secretSet = res.client.secret_set
     }
-    grants.value = res.grants || []
-    grantsLoaded.value = true
   } catch {
     // 问不到就当没登记过，保存时照样能登记
   }
   idp.loaded = true
-  try {
-    const res = await api('/api/users')
-    people.value = res.users.filter((u) => u.id !== auth.user.id)
-  } catch {
-    // 拿不到名单就不画那一栏的选项，授权维持原样
-  }
 }
 
 /* 打开提供方总开关（存在库里，即刻生效）。门户地址没设过的话顺手按当前访问地址填上——
@@ -182,25 +205,29 @@ async function submit() {
     // 登录入口没填就从第一条回调地址推（…/callback → …/login?base=…）
     if (!form.ssoLogin.trim() && isAdmin.value) form.ssoLogin = derivedLogin.value
     if (!form.ssoLogin.trim()) return (error.value = '请填写单点登录入口')
-    if (isAdmin.value) {
-      // 先登记客户端，失败就停在框里——卡片说「走单点登录」而门户不认这个系统，
-      // 点开只会是一张报错页
-      saving.value = true
-      try {
-        const res = await api('/api/idp/cards/' + encodeURIComponent(cardId), {
-          method: 'PUT',
-          body: { client_id: idp.clientId.trim(), name: form.name.trim(),
-                  redirect_uris: uriList.value, client_secret: idp.secret.trim(),
-                  // undefined 会被 JSON 丢掉 = 后端不动授权名单
-                  grants: grantsLoaded.value ? grants.value : undefined }
-        })
-        idp.secretSet = !!res.client?.secret_set
-      } catch (e) {
-        return (error.value = e?.message || '登记失败')
-      } finally {
-        saving.value = false
-      }
+  }
+
+  // 门户这边的两件事先做完，失败就停在框里：客户端没登记上，卡片说「走单点登录」而门户
+  // 不认这个系统，点开只会是一张报错页；分享名单没存上，框一关人就以为已经分享出去了
+  saving.value = true
+  try {
+    if (form.sso && isAdmin.value) {
+      const res = await api('/api/idp/cards/' + encodeURIComponent(cardId), {
+        method: 'PUT',
+        body: { client_id: idp.clientId.trim(), name: form.name.trim(),
+                redirect_uris: uriList.value, client_secret: idp.secret.trim() }
+      })
+      idp.secretSet = !!res.client?.secret_set
     }
+    if (sharesChanged()) {
+      await api('/api/nav/shares/' + encodeURIComponent(cardId), {
+        method: 'PUT', body: { users: shares.value }
+      })
+    }
+  } catch (e) {
+    return (error.value = e?.message || '保存失败')
+  } finally {
+    saving.value = false
   }
 
   if (isEdit.value) updateItem(props.group.id, props.item.id, form)
@@ -216,6 +243,7 @@ onMounted(() => {
   nameInput.value?.focus()
   loadJar()
   loadIdp()
+  loadShares()
 })
 onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 </script>
@@ -357,20 +385,28 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
           <span class="lb">登录入口<em v-if="isAdmin">可选</em></span>
           <input v-model="form.ssoLogin" spellcheck="false" @keyup.enter="submit" />
         </label>
-
-        <div v-if="isAdmin" class="field">
-          <span class="lb">授权给<em v-if="grants.length">{{ grants.length }} 人</em></span>
-          <div class="chips">
-            <button v-for="u in people" :key="u.id" type="button" class="chip"
-              :class="{ on: grants.includes(u.id), off: !u.is_active }"
-              :title="u.username" @click="toggleGrant(u.id)">
-              <svg v-if="grants.includes(u.id)" viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 8.5 3 3 6-7" /></svg>
-              {{ u.display_name }}
-            </button>
-            <span v-if="!people.length" class="none">还没有别的用户</span>
-          </div>
-        </div>
       </template>
+
+      <!-- 不挂在哪个开关底下：什么卡片都能分享，分享出去的是这张卡片的全部配置 -->
+      <div v-if="isAdmin && sharesLoaded" class="field">
+        <span class="lb">分享给<em v-if="shares.length">{{ shares.length }} 人</em>
+          <HintTip>
+            对方页面上多出这张卡片，只能点开用，改不了，也删不掉这次分享。
+            门户代理、Cookie 代理、单点登录这些配置跟着这张卡片走，
+            <strong>登录用的是他自己的</strong>：单点登录以他自己的门户账号登进去，
+            Cookie 代理存的是他自己的登录数据，你的登录不会分给他。
+          </HintTip>
+        </span>
+        <div class="chips">
+          <button v-for="u in people" :key="u.id" type="button" class="chip"
+            :class="{ on: shares.includes(u.id), off: !u.is_active }"
+            :title="u.username" @click="toggleShare(u.id)">
+            <svg v-if="shares.includes(u.id)" viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 8.5 3 3 6-7" /></svg>
+            {{ u.display_name }}
+          </button>
+          <span v-if="!people.length" class="none">还没有别的用户</span>
+        </div>
+      </div>
 
       <label class="field">
         <span class="lb">描述<em>可选</em></span>
@@ -463,7 +499,7 @@ h3 { margin: 0 0 16px; font-size: 16px; }
 
 .field { display: block; margin-top: 12px; }
 
-/* 授权给谁：一个人一颗，点一下切换。外框和输入框同一个底色，一列对齐下来还是「标题 + 一个控件」 */
+/* 分享给谁：一个人一颗，点一下切换。外框和输入框同一个底色，一列对齐下来还是「标题 + 一个控件」 */
 .chips {
   display: flex;
   flex-wrap: wrap;
@@ -492,7 +528,7 @@ h3 { margin: 0 0 16px; font-size: 16px; }
   background: color-mix(in srgb, var(--primary) 16%, transparent);
   border-color: var(--primary);
 }
-.chip.off { opacity: .5; }        /* 已停用的账号：授权留着，但他现在登不进门户 */
+.chip.off { opacity: .5; }        /* 已停用的账号：分享留着，但他现在登不进门户 */
 .chip svg {
   width: 13px;
   height: 13px;

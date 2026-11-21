@@ -326,10 +326,10 @@ _DDL = [
     """,
     """
     CREATE TABLE IF NOT EXISTS card_grants (
-      -- 管理员把自己的一张单点登录卡片授权给别人（app/navstore.py 的 shared）。
+      -- 管理员把自己的一张卡片分享给别人（app/navstore.py 的 shared）。
+      -- 表名还叫 grants 是历史原因：上一版只有单点登录卡片能「授权」，改名就得搬数据。
       -- item_id 是卡片的 client_id，理由同 proxy_cookies：不挂外键指向 nav_items。
-      -- 卡片删了 / 单点登录关了，这几行留着不删，读的时候连着 nav_items 一起看，
-      -- 再打开时授权还在（同 idp_clients.enabled 的路数）
+      -- 卡片删了，这几行留着不删，读的时候连着 nav_items 一起看
       owner_id   BIGINT UNSIGNED NOT NULL,
       item_id    VARCHAR(64)     NOT NULL,
       user_id    BIGINT UNSIGNED NOT NULL,
@@ -340,7 +340,7 @@ _DDL = [
         REFERENCES users (id) ON DELETE CASCADE,
       CONSTRAINT fk_grant_user FOREIGN KEY (user_id)
         REFERENCES users (id) ON DELETE CASCADE
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='单点登录卡片授权给了谁'
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='卡片分享给了谁'
     """,
 ]
 

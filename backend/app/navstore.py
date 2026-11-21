@@ -29,11 +29,15 @@
 一棵树撑死几百行，diff 省下的那点写入量换不回它带来的一堆边界情况
 （拖拽同时改名、换分类再改回来……）。冲突仍然是后写的盖先写的。
 
-## 授权过来的卡片不进这棵树
+## 分享过来的卡片不进这棵树
 
-管理员可以把自己的单点登录卡片授权给别人（`card_grants` 表，`shared` / `set_grants`）。
-被授权的人看到的是**那张卡片本身**，不是一份拷贝：不进他的 nav_groups / nav_items，
-他存导航时也不会把它写进去，管理员改了地址他那边跟着变，撤了授权就没了。
+管理员可以把自己的任意一张卡片分享给别人（`card_grants` 表，`shared` / `set_shares`）。
+被分享的人看到的是**那张卡片本身**，不是一份拷贝：不进他的 nav_groups / nav_items，
+他存导航时也不会把它写进去，管理员改了配置他那边跟着变，取消分享就没了。
+
+**分享的是配置，不是登录。** 卡片上的地址、门户代理、额外域名、Cookie 代理、单点登录
+这些照管理员那张走；但 Cookie 代理的罐子钉在 (被分享的人, 卡片) 上，单点登录认的是
+他自己登着的门户账号——他用的是自己的登录，管理员的登录态一条都不会交给他。
 """
 import json
 import time
@@ -57,8 +61,8 @@ _GROUP_COLUMNS = ('id', 'name', 'items')
 # 跨进程那点延迟由那边的 TTL 兜着
 _revision: dict[int, int] = {}
 
-# 全局的那一份：谁存了导航、谁改了授权都 +1。授权过来的卡片在**别人**名下，
-# 管理员改了它的地址，被授权那个人的代理目标表也得跟着失效（app/proxy.py）
+# 全局的那一份：谁存了导航、谁改了分享都 +1。分享过来的卡片在**别人**名下，
+# 管理员改了它的地址，被分享那个人的代理目标表也得跟着失效（app/proxy.py）
 _shared_revision = 0
 
 
@@ -249,7 +253,7 @@ def save(user_id: int, data: dict) -> int:
     # 开着 Cookie 代理的卡片。存完之后除了这些，别的罐子一律收掉（见 cookiejar.retain）
     with_jar = {str(i.get('id') or '') for g in groups
                 for i in (g.get('items') or []) if i.get('cookieJar')}
-    # 别人授权过来的卡片不在这棵树里，但罐子钉在 (这个人, 那张卡片) 上。
+    # 别人分享过来的卡片不在这棵树里，但罐子钉在 (这个人, 那张卡片) 上。
     # 不算进来的话他每存一次导航，那几张卡片的登录态就被清一次
     with_jar |= {i['id'] for i in shared(user_id) if i.get('cookieJar')}
     # 开着「单点登录」的卡片。它们登记的 IdP 客户端才算数（见 idp.sync）
@@ -308,18 +312,18 @@ def save(user_id: int, data: dict) -> int:
     return int(time.time())
 
 
-# ---------------------------------------------------------------- 授权给别人的卡片
+# ---------------------------------------------------------------- 分享给别人的卡片
 
 def shared(user_id: int) -> list[dict]:
-    """管理员授权给这个人的单点登录卡片：完整的卡片字典，外加 `owner`（授权人的显示名）。
+    """管理员分享给这个人的卡片：完整的卡片字典，外加 `owner`（分享人的显示名）。
 
-    三条都成立才算：授权人**现在**还是启用中的管理员（同 idp.client 的路数，被降级的
-    管理员发出去的授权当场作废）、那张卡片还在、卡片上的单点登录还开着。
-    后两条不成立时授权行留着不删，见 card_grants 表上的说明。
+    两条都成立才算：分享人**现在**还是启用中的管理员（同 idp.client 的路数，被降级的
+    管理员发出去的分享当场作废）、那张卡片还在。卡片删了时分享行留着不删，
+    见 card_grants 表上的说明。
 
     两处用它：/api/nav 带回去画在页面上；app/proxy.py 拿它补进这个人的代理目标表——
-    这类卡片多半开着门户代理，单点登录入口就在 /api/proxy/<那张卡片 id>/ 底下，
-    不补的话被授权的人一点开就是 404。
+    开着门户代理的卡片点开就是 /api/proxy/<那张卡片 id>/，单点登录入口多半也在底下，
+    不补的话被分享的人一点开就是 404。
     """
     with db.cursor() as cur:
         cur.execute(
@@ -334,25 +338,24 @@ def shared(user_id: int) -> list[dict]:
     out = []
     for row in rows:
         item = _row_to_item(row)
-        if item.get('sso'):
-            item['owner'] = row['display_name'] or row['username']
-            out.append(item)
+        item['owner'] = row['display_name'] or row['username']
+        out.append(item)
     return out
 
 
-def grants(owner_id: int, item_id: str) -> list[int]:
-    """这张卡片授权给了谁（用户 id）。卡片编辑框读回来用。"""
+def shares(owner_id: int, item_id: str) -> list[int]:
+    """这张卡片分享给了谁（用户 id）。卡片编辑框读回来用。"""
     with db.cursor() as cur:
         cur.execute('SELECT user_id FROM card_grants WHERE owner_id = %s AND item_id = %s',
                     (owner_id, item_id))
         return sorted(int(r['user_id']) for r in cur.fetchall())
 
 
-def set_grants(owner_id: int, item_id: str, user_ids: list[int]) -> list[int]:
-    """整份换掉这张卡片的授权名单，返回换完的。不存在的用户 id 和授权人自己悄悄丢掉。
+def set_shares(owner_id: int, item_id: str, user_ids: list[int]) -> list[int]:
+    """整份换掉这张卡片的分享名单，返回换完的。不存在的用户 id 和分享人自己悄悄丢掉。
 
-    被撤掉的人在这张卡片上的 Cookie 罐子一并收掉：撤授权的本意就是「别再让他用」，
-    罐子留着的话，哪天再授权回来他直接就是登录状态。他自己名下恰好有张同 id 的
+    被取消的人在这张卡片上的 Cookie 罐子一并收掉：取消分享的本意就是「别再让他用」，
+    罐子留着的话，哪天再分享回来他直接就是登录状态。他自己名下恰好有张同 id 的
     卡片时不动——那个罐子是他自己那张卡片的。
     """
     wanted = {int(u) for u in user_ids or []} - {owner_id}
@@ -379,6 +382,37 @@ def set_grants(owner_id: int, item_id: str, user_ids: list[int]) -> list[int]:
 
 
 # ---------------------------------------------------------------- 老数据
+
+SHARES_FLAG = 'card_shares_v2'
+
+
+def migrate_shares() -> None:
+    """上一版只有单点登录卡片能授权，关掉单点登录时授权行留着、卡片从对方页面上消失。
+    这一版任何卡片都能分享，那些行原样留着的话，关过单点登录的卡片会**悄悄重新出现**
+    在对方页面上——管理员当初关它多半就是不想让人再用。所以升上来时收一次：
+    卡片还开着单点登录的照旧，关了的、卡片已经删了的，分享行连同对方的罐子一起收掉。
+    收过就不再收（`portal_meta` 里记一笔），之后关单点登录和分享就没关系了。
+    """
+    if db.meta_get(SHARES_FLAG):
+        return
+    with db.cursor() as cur:
+        # 一张卡片分享给几个人就有几行，去重放在下面做：extra 是 JSON 列，不拿它 DISTINCT
+        cur.execute('SELECT g.owner_id, g.item_id, i.extra FROM card_grants g '
+                    'LEFT JOIN nav_items i ON i.user_id = g.owner_id AND i.client_id = g.item_id')
+        rows = cur.fetchall()
+    stale = set()
+    for row in rows:
+        extra = db.loads(row.get('extra'))
+        if not (isinstance(extra, dict) and extra.get('sso')):
+            stale.add((int(row['owner_id']), row['item_id']))
+    for owner_id, item_id in stale:
+        set_shares(owner_id, item_id, [])
+    dropped = len(stale)
+    db.meta_set(SHARES_FLAG, str(int(time.time())))
+    if dropped:
+        print(f'[导航] {dropped} 张卡片的老授权已收掉（单点登录关着或卡片已删，'
+              f'升级前对方本来就看不到它们）')
+
 
 LEGACY_FLAG = 'legacy_nav_imported'
 

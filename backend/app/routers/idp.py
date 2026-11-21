@@ -6,8 +6,8 @@
     GET  /api/oidc/userinfo                   对方后端拿 access_token 问「这是谁」
     GET  /api/oidc/jwks                       HS256 用不上，给个空集合
 
-    GET  /api/idp/cards/<卡片 id>             卡片编辑框：这张卡片登记的客户端和授权名单（管理员）
-    PUT  /api/idp/cards/<卡片 id>             卡片编辑框：登记 / 修改，连授权名单一起（管理员）
+    GET  /api/idp/cards/<卡片 id>             卡片编辑框：这张卡片登记的客户端（管理员）
+    PUT  /api/idp/cards/<卡片 id>             卡片编辑框：登记 / 修改（管理员）
 
     GET  /api/idp/settings                    提供方总开关 / issuer / 客户端一览（管理员）
     PUT  /api/idp/settings                    改总开关 / issuer（管理员），即刻生效
@@ -23,7 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
-from .. import auth, config, idp, navstore
+from .. import auth, config, idp
 
 router = APIRouter(tags=['idp'])
 
@@ -106,8 +106,8 @@ def authorize(request: Request, client_id: str = '', redirect_uri: str = '',
     if not idp.allowed(cli, user):
         # 停在门户这儿说清楚，不按 OAuth 那样带 access_denied 跳回去：
         # 对方系统多半只会显示一句「登录失败」，人不知道该去找谁
-        print(f'[单点登录] {user["username"]} 没有「{cli["name"]}」的授权，拒绝')
-        return _error_page(f'你的账号没有被授权使用「{cli["name"]}」，请联系管理员。', 403)
+        print(f'[单点登录] {user["username"]} 不在「{cli["name"]}」的分享名单里，拒绝')
+        return _error_page(f'「{cli["name"]}」这张卡片还没有分享给你，请联系管理员。', 403)
 
     code = idp.issue_code(cli, user, redirect_uri=redirect_uri, scope=scope, nonce=nonce,
                           challenge=code_challenge, method=method, issuer=_issuer(request))
@@ -179,23 +179,20 @@ class CardClientIn(BaseModel):
     name: str = ''
     redirect_uris: list[str] = []
     client_secret: str = ''          # 留空 = 沿用已存的那串
-    grants: list[int] | None = None  # 授权给哪些用户（id）。None = 不动
 
 
-def _card_payload(request: Request, client: dict | None, grants: list[int]) -> dict:
+def _card_payload(request: Request, client: dict | None) -> dict:
     return {
         'idp_enabled': idp.settings()['enabled'],
         # 对方系统里那栏「门户地址」要填的就是它，编辑框里照着显示出来让人抄
         'issuer': _issuer(request),
         'client': client,
-        'grants': grants,
     }
 
 
 @router.get('/api/idp/cards/{item_id}')
 def get_card_client(item_id: str, request: Request, admin: dict = Depends(auth.require_admin)):
-    owner, item = int(admin['id']), item_id[:64]
-    return _card_payload(request, idp.card_client(owner, item), navstore.grants(owner, item))
+    return _card_payload(request, idp.card_client(int(admin['id']), item_id[:64]))
 
 
 @router.put('/api/idp/cards/{item_id}')
@@ -209,10 +206,7 @@ def put_card_client(item_id: str, body: CardClientIn, request: Request,
     except idp.IdpError as exc:
         raise HTTPException(400, str(exc)) from None
     print(f'[单点登录] {admin["username"]} 在卡片上登记了客户端 {saved["client_id"]}')
-    # 授权挂在 (管理员, 卡片) 上，跟着客户端一起存：编辑框里点一次保存就是一次
-    grants = (navstore.set_grants(owner, item, body.grants) if body.grants is not None
-              else navstore.grants(owner, item))
-    return _card_payload(request, saved, grants)
+    return _card_payload(request, saved)
 
 
 # ---------------------------------------------------------------- 设置（总开关 / issuer）

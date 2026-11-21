@@ -12,7 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 或者只有门户这台够得着的站点）。
 
 **数据在 MySQL 里，配置在 `backend/conf.json` 里，两者不混。**
-库里五张表（另有 `proxy_cookies`、`idp_clients`、`card_grants`）：`users`（账号和口令哈希）、`user_identities`（OIDC 绑定）、
+库里五张表（另有 `proxy_cookies`、`idp_clients`、`card_grants`（卡片分享名单））：`users`（账号和口令哈希）、`user_identities`（OIDC 绑定）、
 `nav_prefs` / `nav_groups` / `nav_items`（每人一份的导航），外加一张
 `portal_meta` 放签名密钥和迁移标记。conf.json 只剩连接串、监听地址、OIDC 参数。
 
@@ -192,14 +192,22 @@ conf.json 的 `idp.clients`（启动时读），和**卡片编辑框里登记的
 - **client_id 不许带 `.`**：access_token 是 `<用户>.<版本>.<client_id>.<过期>.<签名>`，带点 userinfo 就拆不开了。
 - 新卡片的 id 在编辑框里先生成（`addItem` 认 `payload.id`）：登记客户端要在卡片落进 state 之前用它；
   登记失败编辑框不关，免得卡片说「走单点登录」而门户不认。
-- **卡片可以授权给别人**（编辑框「授权给」那一栏，`card_grants` 表，跟着 `PUT /api/idp/cards/<id>`
-  一起存）。被授权的人页面最上面多一块只读的「授权给我的」（[SharedGroup.vue](webside/src/components/SharedGroup.vue)），
+- **管理员可以把任意一张卡片分享给别人**（编辑框「分享给」那一栏，不挂在哪个开关底下；
+  `card_grants` 表——表名是「授权」那一版留下的；单独走 `GET/PUT /api/nav/shares/<id>`，挂 `require_admin`，
+  名单挂在 (当前管理员, 卡片 id) 上）。被分享的人页面最上面多一块只读的「分享给我的」
+  （[SharedGroup.vue](webside/src/components/SharedGroup.vue)），改不了卡片、也删不掉这次分享。
   数据是 `/api/nav` 回的 `shared`，**不在 `data` 里、不进 store.js 的 `state`**——进了就会被自动保存
-  当成他自己的卡片写回去，变成一份拷贝。管理员改地址他那边跟着变，撤授权 / 关单点登录 / 删卡片 /
-  授权人被降级，卡片就没了（授权行留着，同 `idp_clients.enabled` 的路数）。
-- **普通用户只能登进授权给他的系统**（`idp.allowed`，授权端点和 userinfo 都查）；管理员都能，
-  conf.json 里登记的客户端谁都能。没授权时停在门户报错页，不带 `access_denied` 跳回去。
-- 授权过来的卡片多半开着门户代理，所以 proxy.py 的 `_targets` 把 `navstore.shared` 也收进
+  当成他自己的卡片写回去，变成一份拷贝。管理员改配置他那边跟着变，取消分享 / 删卡片 /
+  分享人被降级，卡片就没了（删卡片时分享行留着，读的时候连着 nav_items 看）。
+- **分享的是配置，不是登录。** 门户代理、额外域名、Cookie 代理、单点登录全照管理员那张卡片走，
+  但 Cookie 罐子钉在 (被分享的人, 卡片 id) 上，单点登录认的是他自己登着的门户账号。
+  别改成「用分享人的罐子」——那等于把管理员在外部站点的登录态交给每一个被分享的人。
+- **普通用户只能登进分享给他的系统**（`idp.allowed`，授权端点和 userinfo 都查）；管理员都能，
+  conf.json 里登记的客户端谁都能。没分享给他时停在门户报错页，不带 `access_denied` 跳回去。
+- 上一版只有单点登录卡片能「授权」，关单点登录时授权行留着、卡片从对方页面上消失。
+  升到「分享」这一版时 `navstore.migrate_shares` 收一次：单点登录关着或卡片已删的那些行
+  连同对方的罐子一起删掉（`portal_meta` 的 `card_shares_v2` 记着收过），不然它们会悄悄重新出现。
+- 分享过来的卡片多半开着门户代理，所以 proxy.py 的 `_targets` 把 `navstore.shared` 也收进
   这个人的目标表（自己的卡片优先），目标表缓存的失效计数多了一个全局的 `shared_revision`。
 
 - **授权码存在进程内字典里，60 秒、一次性**——全仓库唯一一处服务端存票，因为签名串做不到一次性。
@@ -252,7 +260,7 @@ conf.json 的 `idp.clients`（启动时读），和**卡片编辑框里登记的
   只剩 label 认得出哪栏是哪栏。**所有输入框都不放 placeholder**，这是按要求逐个去掉的；
   非说不可的状态写在 label 后面的 `<em>` 里，比如 Client Secret 的「已设置，留空不改」。）
 - **新账号一张卡片都不带**：`normalize(null)` 给的是一个空的「我的导航」分类，
-  不是示例卡片。卡片由他自己加，或者管理员授权过来（见门户当 IdP 那一节）。
+  不是示例卡片。卡片由他自己加，或者管理员分享过来（见门户当 IdP 那一节）。
 - **`nav.title` 页面上不显示了，但照样读进来、照样写回去**：谁在 conf.json 里手写了
   一个标题，不该被下一次存导航悄悄抹掉。`state.theme` 同理（没有切换按钮了，
   但 `applyTheme` 照常跟着它走，默认 auto = 跟随系统）。
@@ -347,7 +355,7 @@ conf.json 的 `idp.clients`（启动时读），和**卡片编辑框里登记的
   同名的会互相顶掉。内网里另一台机器要转的话，把它填进卡片的「额外域名」。
 - 直接转发模式只认卡片自己那台机器，地址里塞不进主机名（老形状的链接继续认）。
 - 两种模式都只转 http/https（卡片填 `ssh://` 的也有，那种转不了）。
-- **要登录，而且要是「这张卡片的主人」，或者管理员把这张单点登录卡片授权给了他。**
+- **要登录，而且要是「这张卡片的主人」，或者管理员把这张卡片分享给了他。**
   归属校验就是 `_target(user_id, item_id)`
   那一句：查的是 `_targets(user_id)` 这张**按人建的**表，不是先查全局表再比对 user_id。
   比对写法只要哪天多一条取卡片的路就漏一次，而漏一次的后果是「拿到别人的卡片 id

@@ -5,7 +5,7 @@ import { getHost, proxyUrl } from '../utils'
 
 const props = defineProps({
   item: { type: Object, required: true },
-  /* 管理员授权过来的卡片：不是自己的，没有编辑 / 删除 */
+  /* 管理员分享过来的卡片：不是自己的，没有编辑 / 删除 */
   readonly: { type: Boolean, default: false }
 })
 const emit = defineEmits(['edit', 'remove'])

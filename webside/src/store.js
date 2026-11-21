@@ -65,7 +65,7 @@ export const sync = reactive({
 })
 
 /**
- * 管理员授权给我的单点登录卡片（后端 navstore.shared）。**不放进 state**：
+ * 管理员分享给我的卡片（后端 navstore.shared）。**不放进 state**：
  * state 整份会被 push() 推回去、被自动保存盯着，放进去等于把别人的卡片
  * 存成自己的一份拷贝。也不进本机缓存——它是只读的，跟着每次 pull() 刷新。
  */
@@ -206,7 +206,7 @@ function normalize(data) {
   }
 }
 
-/* 新账号给一个空分类，一张卡片都不带：卡片由他自己加，或者管理员授权过来（shared）。
+/* 新账号给一个空分类，一张卡片都不带：卡片由他自己加，或者管理员分享过来（shared）。
    留一个空分类而不是什么都没有：有它才有「添加导航」那个格子，进来就知道往哪儿点 */
 function defaultGroups() {
   return [normalizeGroup({ name: DEFAULT_GROUP, items: [] })]

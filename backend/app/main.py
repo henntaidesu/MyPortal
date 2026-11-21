@@ -54,6 +54,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if first is not None:
         # 第一个管理员刚建出来，老版本 conf.json 里那段导航就搬到他名下
         navstore.import_legacy(int(first['id']))
+    navstore.migrate_shares()   # 「授权」变成「分享」那一版的老数据，收一次就不再收
 
     iconcache.ensure()          # 图标缓存目录，没有就建
     iconcache.purge()

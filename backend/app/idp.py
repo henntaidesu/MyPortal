@@ -26,9 +26,10 @@ client_id 里带点会让 userinfo 拆不开 token。
 
 ## 谁能登进去
 
-卡片上登记的客户端，管理员都能用，**普通用户要那张卡片授权给了他**（`allowed`，
-授权在 card_grants 表，卡片编辑框里勾）。授权了的卡片会出现在他的页面上
-（app/navstore.py 的 `shared`）。conf.json 里登记的客户端没有卡片可授权，仍然谁都能用。
+卡片上登记的客户端，管理员都能用，**普通用户要那张卡片分享给了他**（`allowed`，
+分享名单在 card_grants 表，卡片编辑框「分享给」那一栏里勾）。分享了的卡片会出现在他的页面上
+（app/navstore.py 的 `shared`），他点进去登进那个系统的是**他自己**的门户账号——
+分享的是卡片的配置，不是管理员的登录。conf.json 里登记的客户端没有卡片可分享，仍然谁都能用。
 
 ## 票据都长什么样
 
@@ -190,7 +191,7 @@ def client(client_id: str) -> Optional[dict]:
     if not row:
         return None
     cli = _row_to_client(row)
-    # 卡片上登记的才有这两项，allowed() 拿它们去查授权
+    # 卡片上登记的才有这两项，allowed() 拿它们去查分享名单
     cli['owner_id'], cli['item_id'] = int(row['owner_id']), row['item_id']
     return cli
 
@@ -198,10 +199,10 @@ def client(client_id: str) -> Optional[dict]:
 def allowed(cli: dict, user: dict) -> bool:
     """这个人能不能用门户账号登进这个系统。
 
-    - conf.json 里登记的：谁都能，和以前一样（那边没有卡片，也就无从授权）；
+    - conf.json 里登记的：谁都能，和以前一样（那边没有卡片，也就无从分享）；
     - 管理员：都能，客户端本来就是管理员登记的；
-    - 普通用户：登记它的那张卡片得授权给了他（card_grants，卡片编辑框里勾）。
-      没授权的人页面上看不到那张卡片，但单点登录入口的地址能猜、能转发，这里还得拦一道。
+    - 普通用户：登记它的那张卡片得分享给了他（card_grants，卡片编辑框里勾）。
+      没分享给他的人页面上看不到那张卡片，但单点登录入口的地址能猜、能转发，这里还得拦一道。
     """
     if 'owner_id' not in cli or (user.get('role') or 'user') == 'admin':
         return True
@@ -429,7 +430,7 @@ def user_from_access(token: str) -> Optional[dict]:
     row = _lookup(user_id)
     if row is None or not row['is_active'] or int(row['token_version']) != version:
         return None
-    # 撤了授权之后，手里那枚 access_token 也当场不认，不用等它过期
+    # 取消分享之后，手里那枚 access_token 也当场不认，不用等它过期
     return row if allowed(cli, row) else None
 
 

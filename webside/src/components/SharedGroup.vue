@@ -1,7 +1,7 @@
 <script setup>
 /**
- * 管理员授权给我的单点登录卡片，画成一张和分类一样的大卡，但**只读**：
- * 不能拖、不能改名、不能往里加、卡片上没有编辑和删除。
+ * 管理员分享给我的卡片，画成一张和分类一样的大卡，但**只读**：
+ * 不能拖、不能改名、不能往里加、卡片上没有编辑和删除——分享也只有分享的人收得回去。
  *
  * 不复用 NavGroup.vue 加一个 readonly 开关：那边从头到尾挂着拖放和改名，
  * 每一处都要加条件，漏一处就能把别人的卡片拖进自己的分类里（变成一份拷贝存下去）。
@@ -14,7 +14,7 @@ import { shared } from '../store'
 <template>
   <section v-if="shared.length" class="group">
     <header class="ghead">
-      <h2 class="gname">授权给我的</h2>
+      <h2 class="gname">分享给我的</h2>
       <span class="count">{{ shared.length }}</span>
     </header>
 
