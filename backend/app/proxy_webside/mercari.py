@@ -67,6 +67,17 @@ def on_request(ctx: Ctx, headers: list) -> None:
         headers[:] = [(k, v) for k, v in headers if k.lower() != 'next-router-state-tree']
 
 
-# 这个站暂时没有需要额外注入的脚本：路由跳转走 history.pushState、
-# 取数据走 fetch，两条通用钩子都盖得住（app/proxyhook.py）。
-BROWSER_JS = ''
+# jp.mercari.com 本身不用额外的脚本：路由跳转走 history.pushState、取数据走 fetch，
+# 两条通用钩子都盖得住（app/proxyhook.py）。
+# 点「ログイン」是 `location.assign('https://auth.mercari.com/jp/v1/authorize?…')`，
+# 上面关了 JS 改写，那条字面量没换——靠通用那段 navigate 事件拦回代理底下。
+# 拦不住的话浏览器直连过去，带的是自己那份 Cookie，登进去的是真 jp.mercari.com。
+#
+# 登录页 login.jp.mercari.com 是另一个应用（React Router v6 的 BrowserRouter，没设 basename），
+# 拿 `/api/proxy/<id>/__portal__/https/login.jp.mercari.com/signin` 去匹配路由，
+# 一条对不上，整页是它自己的「ページが見つかりませんでした」。`routerView()` 让路由读到
+# 上游那条路径（/signin），见 app/proxyhook.py。只在登录页开：jp.mercari.com 是 Next.js，
+# 读的是全局 location，开了也没用，白担一份 defaultView !== window 的风险。
+BROWSER_JS = """
+if (window.__portal.cfg.host === 'login.jp.mercari.com') window.__portal.routerView();
+"""

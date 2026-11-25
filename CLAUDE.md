@@ -52,8 +52,14 @@ pyinstaller.bat                   # 产物 Releases\<版本>\Portal.exe
 第一个管理员由 `auth.bootstrap_admin` 建，**只在 users 表为空时看这一段**——
 已经有人了就完全不管它，所以配置里留着那对用户名口令既不会重复建号，
 也不会把人家在页面上改过的口令改回去。
+那一段还是自动生成的 `admin/admin` 时**不拿它建号**，换成随机口令打在日志里、写进
+`initial-admin-password.txt`（`users.ensure_bootstrap`）：门户默认监听 0.0.0.0，admin/admin
+等于同一网络里谁都能当管理员。启动时的弱口令警告看的是库里的哈希（`users.default_password_in_use`）。
 
-**本仓库没有测试、没有 linter、没有 CI**。改动靠手动跑起来验证：`start.bat` 起前后端，
+`backend/tests/` 下有一组不连库、不连网的单元测试：在 backend/ 目录下
+`python -m unittest discover -s tests`。改代理、登录、OIDC 那几处之后先跑一遍。
+
+**本仓库没有 linter、没有 CI**（单元测试见上一段）。改动主要靠手动跑起来验证：`start.bat` 起前后端，
 登录 → 加一张卡片 → 刷新看还在不在 → 到库里 `SELECT * FROM nav_items` 看一眼。
 多用户那部分再多验一步：**另开一个隐身窗口用第二个账号登进去，确认看到的是空的**。
 
@@ -147,7 +153,12 @@ pyinstaller.bat                   # 产物 Releases\<版本>\Portal.exe
 - **`COOKIE_SECURE` 反向陷阱**：https 部署必须开，但 http 环境下开了浏览器会**直接丢掉**
   登录 Cookie，表现为登录后立刻又变成未登录。
 - **登录限流是进程内内存**（`_fails` dict）。多 worker 起 uvicorn 会让它失效，
-  目前设计就是单进程。
+  目前设计就是单进程。按来源 IP（10 次 / 5 分钟）和用户名（20 次 / 5 分钟）两样计数，
+  改口令时验旧口令也走这一套。
+- **`client_ip` 只看 `request.client`，别改回自己读 `X-Forwarded-For`**：那个头谁都能填，
+  每次换一个值限流就不存在了（审计时实际是这样）。可信反代由 conf.json
+  `server.forwarded_allow_ips` 交给 uvicorn 的 `proxy_headers` 处理，默认只信本机；
+  反代不在本机、或者 Cloudflare 直连门户时要把它们的地址填进去，**别填 `*`**。
 
 #### OIDC 这一路
 
@@ -160,6 +171,11 @@ pyinstaller.bat                   # 产物 Releases\<版本>\Portal.exe
   （指到假 IdP、拿别的客户端的 token 来换会话、重放）。
 - **认人只认 `sub`，不认 email 也不认用户名。** 那两个在 IdP 里都能改，跟着它们走会让
   改过名的人下次登录变成另一个账号，导航跟着丢。用户名只在**第一次**建号时用一下。
+- **首次登录不按同名认领有口令的本地账号**（`_resolve`）：只认领管理员预建的「纯单点登录」
+  占位账号（`password_hash` 是 NULL、还没绑过）。以前见同名就认领，IdP 允许自助注册时
+  注册一个叫 `admin` 的号就成了门户的 admin。有口令的人要绑，登录门户后在「账号」里点
+  「绑定单点登录」（`/api/auth/oidc/login?link=1`，state 里记着发起人，回来时再对一次会话，
+  这个 sub 已经绑在别人身上就拒）。用 email 当用户名时要求 `email_verified` 为 true。
 - **state / nonce / PKCE 存在一枚签名过的临时 Cookie 里**（`portal_oidc`，10 分钟），
   服务端什么都不存。它的 `SameSite` **必须是 lax 不能是 strict**：从 IdP 跳回来那一下
   是跨站发起的顶层导航，strict 会让浏览器不带这枚 Cookie，表现成「每次回来都说状态丢了」。
@@ -361,10 +377,24 @@ conf.json 的 `idp.clients`（启动时读），和**卡片编辑框里登记的
   DNS 拦广告时，日志里是一串 `googleads.g.doubleclick.net` 的 502（「门户解析不了」）。
   到了外站那一页，它自己的注册域会临时并进**这一次响应**的改写白名单（`_rewriter`
   的 `foreign`），卡片的白名单不变。挡不住 DNS rebinding，量级和下面「被代理页面能调
-  `/api/nav`」那条一样。外站的 Cookie 和卡片那族站点共用 `/api/proxy/<id>/` 这一个路径，
-  同名的会互相顶掉。内网里另一台机器要转的话，把它填进卡片的「额外域名」。
+  `/api/nav`」那条一样。内网里另一台机器要转的话，把它填进卡片的「额外域名」。
+- **外站不给 Cookie，也不收它种的**（`forward` 里 `foreign` 那段）：卡片那族站点的 Cookie 去掉了
+  `Domain`、全钉在 `/api/proxy/<id>/` 上，以前会整份转给点出去的外站——在メルカリ 里点一个外链，
+  メルカリ 的会话就到了那个外站的服务器上。罐子也不用。
+- **卡片自己那台机器之外的主机，只能从门户自己的页面里进**（`_entry_ok`）：要
+  `Sec-Fetch-Site` 是 `same-origin` / `none`，老浏览器没有这个头就要 Referer 是同一张卡片底下。
+  不拦的话 `/api/proxy/<id>/__portal__/https/坏站/x.html` 发给管理员，点开就是坏站的脚本
+  带着他的会话跑在门户源下（`Fallback` 靠的 Referer 一句 `no-referrer` 就绕开）。白名单里的
+  兄弟域名也算——注册域放进来的 `xxx.github.io` 未必是卡片主人的内容。
+  **这只是把门槛从「一条链接」抬高了**：页面里的第三方脚本、点出去的外站仍然同源。
+  根治是把代理放到另一个源（独立子域，那里没有 `portal_session`），还没做。
 - 直接转发模式只认卡片自己那台机器，地址里塞不进主机名（老形状的链接继续认）。
 - 两种模式都只转 http/https（卡片填 `ssh://` 的也有，那种转不了）。
+- **只有管理员的卡片能转内网**（`Target.private_ok`，`_check_address`）：管理员自己的卡片、
+  管理员分享出来的卡片可以连内网和本机；普通用户自己加的卡片只许公网（解析出来全是公网、
+  单标签名字算内网）。链路本地（169.254.169.254 云元数据）、0.0.0.0、组播谁都不行。
+  以前什么都不查，任何账号加一张 `http://169.254.169.254/` 的卡片就能读云元数据。
+  目标表缓存的失效条件里带着角色，降级后当场收紧。`/api/icon` 同一条规矩，跳转每一跳都查。
 - **要登录，而且要是「这张卡片的主人」，或者管理员把这张卡片分享给了他。**
   归属校验就是 `_target(user_id, item_id)`
   那一句：查的是 `_targets(user_id)` 这张**按人建的**表，不是先查全局表再比对 user_id。
@@ -548,12 +578,22 @@ conf.json 的 `idp.clients`（启动时读），和**卡片编辑框里登记的
 
 - **被认领的卡片自动按整站办**，哪怕卡片上选的是「直接转发」：这里躺着的本来就是
   直接转发必坏的那几个站，认出来了还按直接转发办，只会让人对着半张页面查半天。
-- **`REWRITE_JS = False` 之后这个站的问题基本都得靠注入的脚本兜**，代价是
-  `location.href = 'https://…'` 这种钩子拦不住的跳转会直接走出代理。关之前先点几下。
+- **`REWRITE_JS = False` 之后这个站的问题基本都得靠注入的脚本兜**，
+  `location.href = 'https://…'` 这种跳转只剩 navigate 事件那一道（见下面「整站模式够不着的地方」），
+  没有 Navigation API 的浏览器会直接走出代理。关之前先点几下。
   这一类毛病**后端日志全是 200**，只在浏览器里报——查的时候别盯着日志，
   开 DevTools 看 console，或者拿 playwright 挂 `pageerror` 跑一遍
   （メルカリ 那次就是这么定位的：Next.js 的错误边界 `<html id="__next_error__">`
   长得和 Chrome 的网络错误页一模一样，写着「This page couldn't load」）。
+- **前端路由拿代理路径去匹配，整页「页面不存在」**：浏览器里的路径是
+  `/api/proxy/<id>/__portal__/https/<主机>/signin`，没设 basename 的 SPA 一条路由都对不上。
+  React Router（v6 / @remix-run/router）的 BrowserRouter 读的是 `document.defaultView.location`
+  而不是全局 location，所以注入的脚本备了一个 `window.__portal.routerView()`：把 defaultView
+  换成 window 外面一层 Proxy，`location` 按上游地址算。**默认不开**，站点模块在 `BROWSER_JS` 里
+  按主机调（メルカリ 只在 `login.jp.mercari.com` 开）——开了之后 defaultView !== window，
+  读全局 location 的路由（Vue Router、Next.js）也帮不上。Proxy 交出去的函数要绑回 window，
+  **按属性名判断要不要绑（大写开头 = 构造函数不绑），别按函数长相判断**：Sentry 拿普通 function
+  换掉 addEventListener 还给它安了 prototype，按长相判会漏绑，整页白屏（实测踩过）。
 - **`_MODULES` 和 [portal.spec](portal.spec) 的 `hiddenimports` 都是写死的清单，
   新加站点文件两处都要加。** 前者别改成 pkgutil 扫目录、后者别改成
   `collect_submodules`：PyInstaller 靠静态分析决定打包什么，动态导入它看不见，
@@ -561,8 +601,14 @@ conf.json 的 `idp.clients`（启动时读），和**卡片编辑框里登记的
 
 #### 整站模式够不着的地方（知道就行，别指望）
 
-- **`location.href = '...'` 这类赋值拦不住**：`Location` 的属性是 unforgeable，
-  脚本改不了。字面量改写能覆盖大半，再兜不住就落到 `Fallback` 上。
+- **`location.href = '...'` / `location.assign()` 包不了，只能从 navigate 事件拦**：
+  `Location` 的属性是 unforgeable。注入的脚本听 Navigation API 的 `navigate`，目的地跨源的
+  取消掉、按 `toNav` 换成代理地址再跳一次（proxyhook.py「地址栏与 Cookie」那段）。
+  **实际出过事**：メルカリ 点「ログイン」是 `location.assign('https://auth.mercari.com/…')`，
+  它又关着 JS 改写，浏览器直连过去带的是自己那份 Cookie，本机登着的话转一圈回来
+  地址栏已经是真 `https://jp.mercari.com/`，整个出了代理，Cookie 代理也白开。
+  够不着的：带请求体的（POST 表单，重新跳会丢请求体，靠 submit 那段提前换 action）、
+  没有 Navigation API 的浏览器（那里还是靠字面量改写覆盖大半，再兜不住就落到 `Fallback` 上）。
 - **门户最好挂在 https 下**。站点里 `if (location.protocol !== 'https:')` 然后自己跳转的
   写法不少，http 门户下会跳到一个不存在的地方。（`cookie_secure` 同理。）
 - **按域名发牌的第三方过不了**（reCAPTCHA 那类）：域名对不上，代理与否都一样。

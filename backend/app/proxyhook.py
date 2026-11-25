@@ -18,8 +18,10 @@ app/proxyrewrite.py 改的是**正文里写死的地址**，覆盖不到这几�
 
 - **整段内联进 HTML，不做成外链脚本**：它必须比页面里任何一个脚本先跑完，
   外链多一次往返不说，`async`/`defer` 的次序也不好保证。几 KB 而已。
-- **拦不住的就是拦不住**：`location.href = '...'`、`location.replace(...)` 是
-  unforgeable 属性，脚本改不了。这类跳转靠正文改写覆盖（字面量那半截已经被换掉了），
+- **`location.href = '...'`、`location.replace(...)` 包不了，改从 navigate 事件拦**：
+  `Location` 的属性是 unforgeable，脚本改不了；但 Navigation API 在真跳之前会先发
+  navigate 事件，跨源的取消掉、换成代理地址重新跳（脚本里「地址栏与 Cookie」那段）。
+  没有 Navigation API 的浏览器还是拦不住，靠正文改写覆盖（字面量那半截已经被换掉了），
   再兜不住就落到门户根路径上，由 app/proxy.py 末尾那条 Referer 兜底转回来。
 - **Service Worker 直接掐掉**：它注册下来的作用域是 `/api/proxy/<id>/…`，
   会横在所有请求前面按自己那套改地址，和这里两套改法打架；而且卸载它得进
@@ -267,7 +269,8 @@ _JS = r"""
           if (next !== input.url) input = new Request(next, input);
         }
       } catch (e) { /* 换不成就按原样发，总比整条请求发不出去强 */ }
-      return orig.call(this, input, init);
+      /* 不用 this：经 routerView 那层 Proxy 调进来时 this 是 Proxy，原生 fetch 不认 */
+      return orig.call(window, input, init);
     };
   });
 
@@ -456,6 +459,101 @@ _JS = r"""
       };
     });
   });
+
+  /* `location.href = x`、`location.assign(x)`、`location.replace(x)` 是 unforgeable 的，包不了；
+     但 Navigation API 的 navigate 事件在它们真跳之前先发一次，push / replace 这两种还能取消。
+     所以在这儿拦：目的地出了门户这个源的，取消掉，换成 toNav 之后的地址重新跳一次。
+
+     メルカリ 就栽在这儿：点「ログイン」是 `window.location.assign('https://auth.mercari.com/…')`，
+     而它关着 JS 改写（REWRITE_JS = False），那条字面量没被换。浏览器直连 auth.mercari.com，
+     带的是浏览器自己那份 Cookie——本机登着的话转一圈回来，已经是真 jp.mercari.com 上登好的页面，
+     整个出了代理，Cookie 代理那个罐子也就白开了。
+
+     只管跨源的：门户这个源上的（根绝对地址被解析到门户头上那种，`/api/oidc/` 也在这儿）
+     照旧交给 app/proxy.py 的 Fallback。带请求体的（POST 表单）不碰——取消了重新跳，
+     请求体就丢了，那种靠上面 submit 那段在提交前换好 action。下载、同文档内的跳转也不碰。
+     重新跳放进 setTimeout：不在 navigate 事件里套一次新的跳转，各家实现对那种重入的处理不一定齐。
+     浏览器没有 Navigation API（老版 Safari / Firefox）时这一段整个跳过，和以前一样拦不住。 */
+  try {
+    if (window.navigation && typeof window.navigation.addEventListener === 'function') {
+      window.navigation.addEventListener('navigate', function (ev) {
+        try {
+          if (!ev.cancelable || ev.formData || ev.downloadRequest != null) return;
+          if (ev.navigationType !== 'push' && ev.navigationType !== 'replace') return;
+          var dest = ev.destination;
+          if (!dest || dest.sameDocument || !dest.url) return;
+          if (new NativeURL(dest.url).origin === location.origin) return;
+          var next = toNav(dest.url);
+          if (next === dest.url) return;    /* 非 http(s)、带 user@ 的：转不了，放它走 */
+          ev.preventDefault();
+          var replace = ev.navigationType === 'replace';
+          setTimeout(function () { replace ? location.replace(next) : location.assign(next); }, 0);
+        } catch (e) {}
+      });
+    }
+  } catch (e) {}
+
+  /* ---------------- 前端路由看到的地址（站点模块按需打开） ----------------
+     页面在浏览器里的路径是 /api/proxy/<id>/__portal__/https/<主机>/signin，前端路由拿它去匹配，
+     一条都对不上，渲染出来的是站点自己的「页面不存在」——login.jp.mercari.com 就是这样。
+     `location` 是 unforgeable 的，换不掉；但 React Router（v6 / @remix-run/router，老的 history 库同理）
+     的 BrowserRouter 不读全局的 location，读的是 `document.defaultView.location`。
+     所以把 `document.defaultView` 换成 window 外面的一层 Proxy：别的照原样转给 window，
+     只有 `location` 给一个按上游地址算的（pathname 是 /signin）。改地址栏照旧走 history.pushState，
+     上面那层包装会把它折回代理底下。
+
+     **默认不开**，由站点模块在 BROWSER_JS 里调 `window.__portal.routerView()`：开了之后
+     defaultView 不再 === window，拿它和 window、event.source 比相等的代码会对不上；
+     读全局 location 的路由（Vue Router、Next.js）这招也帮不上。 */
+  function routerView() {
+    if (routerView.on) return;
+    routerView.on = true;
+    try {
+      var dv = Object.getOwnPropertyDescriptor(Document.prototype, 'defaultView');
+      if (!dv || !dv.get || !dv.configurable) return;
+      var now = function () { return new NativeURL(realHref()); };
+      var loc = {
+        assign: function (u) { location.assign(toNav(u)); },
+        replace: function (u) { location.replace(toNav(u)); },
+        reload: function () { location.reload(); },
+        toString: function () { return realHref(); }
+      };
+      ['href', 'origin', 'protocol', 'host', 'hostname', 'port', 'pathname', 'search', 'hash']
+        .forEach(function (k) {
+          Object.defineProperty(loc, k, {
+            enumerable: true,
+            get: function () { return now()[k]; },
+            set: function (v) { var u = now(); u[k] = v; location.assign(toNav(u.href)); }
+          });
+        });
+      /* window 上的函数要绑回 window 再交出去：经 Proxy 调的话 this 是 Proxy，
+         原生方法当场抛 Illegal invocation。构造函数不绑：绑过的函数没有 prototype，
+         `view.HTMLElement.prototype` 会变成 undefined。
+         **按属性名分，不按函数长相分**：window 上大写开头的是构造函数 / 接口（HTMLElement、URL、
+         Image），方法都是小写开头。看函数本身（原生的？有没有 prototype？）靠不住——
+         Sentry 拿普通 function 把 addEventListener 换掉，还给它安了个 prototype，
+         里面再 apply(this)，不绑就炸（登录页实测，整页白屏） */
+      var bound = new WeakMap();
+      var view = new Proxy(window, {
+        get: function (t, k) {
+          if (k === 'location') return loc;
+          var v = Reflect.get(t, k);
+          if (v === t) return view;               /* window.window、self 这类指回自己的 */
+          if (typeof v !== 'function' || typeof k === 'string' && /^[A-Z]/.test(k)) return v;
+          var b = bound.get(v);
+          if (!b) { b = v.bind(t); bound.set(v, b); }
+          return b;
+        },
+        set: function (t, k, v) { t[k] = v; return true; }
+      });
+      Object.defineProperty(Document.prototype, 'defaultView', {
+        configurable: true,
+        enumerable: dv.enumerable,
+        get: function () { var w = dv.get.call(this); return w === window ? view : w; }
+      });
+    } catch (e) {}
+  }
+  window.__portal.routerView = routerView;
 
   /* 脚本自己种的 Cookie 也得钉在这张卡片的路径下，否则 path=/ 会让它跟着门户
      每个请求跑，几个站点的同名 Cookie 互相顶掉 */

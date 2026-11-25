@@ -1,7 +1,7 @@
 """conf.json：门户的**配置**，从这一版起里面只有配置，没有数据。
 
     {
-      "server":   {"host": "0.0.0.0", "port": 9921},
+      "server":   {"host": "0.0.0.0", "port": 9921, "forwarded_allow_ips": "127.0.0.1"},
       "database": {"host": "127.0.0.1", "port": 3306, "user": "portal",
                    "password": "", "name": "portal", "pool_size": 8},
       "auth":     {"session_hours": 168, "cookie_secure": false,
@@ -51,7 +51,15 @@ DEFAULT_PASSWORD = 'admin'
 # 自动生成的 conf.json 内容。database 那一段是必须有人填的，填不对就起不来——
 # 这一版没有「退回单机模式」的余地。
 _DEFAULT: dict[str, Any] = {
-    'server': {'host': '0.0.0.0', 'port': 9921},
+    'server': {
+        'host': '0.0.0.0',
+        'port': 9921,
+        # 哪些地址发来的 X-Forwarded-For / X-Forwarded-Proto 可信（逗号分隔，交给 uvicorn）。
+        # 门户前面的反代不在本机时把它的地址加进来；挂在 Cloudflare 后面直连门户时
+        # 要填 Cloudflare 的网段。**别填 *** ——那等于谁都能在请求头里自称任何 IP，
+        # 登录限流就没用了
+        'forwarded_allow_ips': '127.0.0.1',
+    },
     'database': {
         'host': '127.0.0.1',
         'port': 3306,
@@ -235,6 +243,8 @@ def _bool(section: str, key: str, default: bool) -> bool:
 # ---------------------------------------------------------------- 服务
 HOST = _str('server', 'host', '0.0.0.0') or '0.0.0.0'
 PORT = _int('server', 'port', 9921)
+# 老 conf.json 里没有这一项：按 uvicorn 的默认值（只信本机）办
+FORWARDED_ALLOW_IPS = _str('server', 'forwarded_allow_ips', '127.0.0.1') or '127.0.0.1'
 
 # ---------------------------------------------------------------- 数据库
 DB_HOST = _str('database', 'host', '127.0.0.1') or '127.0.0.1'

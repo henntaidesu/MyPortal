@@ -118,8 +118,11 @@ def unpack_state(raw: str) -> dict:
 
 # ---------------------------------------------------------------- 授权
 
-def begin(redirect_uri: str, next_url: str = '/') -> tuple[str, str]:
-    """返回 (要跳过去的授权地址, 要种进临时 Cookie 的状态串)。"""
+def begin(redirect_uri: str, next_url: str = '/', link: int = 0) -> tuple[str, str]:
+    """返回 (要跳过去的授权地址, 要种进临时 Cookie 的状态串)。
+
+    `link` 非 0 = 这一趟不是登录，是已经登着的这个用户（id）要把 IdP 账号绑到自己身上。
+    """
     doc = discovery()
     state = secrets.token_urlsafe(24)
     nonce = secrets.token_urlsafe(24)
@@ -141,7 +144,7 @@ def begin(redirect_uri: str, next_url: str = '/') -> tuple[str, str]:
     url = f'{doc["authorization_endpoint"]}?{urlencode(params)}'
     packed = pack_state({
         'state': state, 'nonce': nonce, 'verifier': verifier,
-        'redirect_uri': redirect_uri, 'next': next_url,
+        'redirect_uri': redirect_uri, 'next': next_url, 'link': int(link or 0),
         'exp': int(time.time()) + STATE_TTL,
     })
     return url, packed
@@ -245,8 +248,9 @@ def claims(tokens: dict, saved: dict) -> dict:
 
 # ---------------------------------------------------------------- claims → 用户
 
-def pick_username(claims_: dict) -> str:
-    """挑一个当门户用户名。取不到配置里那个 claim 就退回 email，再退回 sub。
+def pick_username_claim(claims_: dict) -> tuple[str, str]:
+    """挑一个当门户用户名，返回 (值, 取自哪个 claim)。取不到配置里那个 claim 就退回
+    email，再退回 sub。
 
     只在**第一次**给这个 sub 建号时用得上；建完之后认人一律靠 sub，
     IdP 那边改名不会把人变成另一个账号。
@@ -255,8 +259,12 @@ def pick_username(claims_: dict) -> str:
         value = str(claims_.get(key) or '').strip()
         if value:
             # 邮箱当用户名时把 @ 后面那截留着，同名不同域的人不会撞
-            return value[:64]
-    return ''
+            return value[:64], key
+    return '', ''
+
+
+def pick_username(claims_: dict) -> str:
+    return pick_username_claim(claims_)[0]
 
 
 def is_admin(claims_: dict) -> Optional[bool]:

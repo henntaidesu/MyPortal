@@ -58,13 +58,13 @@ def login(body: LoginIn, request: Request, response: Response):
         raise HTTPException(403, '本地账号登录已经关闭，请走单点登录')
 
     key = auth.client_ip(request)
-    wait = auth.login_blocked(key)
+    wait = auth.login_blocked(key, body.username)
     if wait:
         raise HTTPException(429, f'失败次数太多，请 {wait} 秒后再试')
 
     user = auth.check_credentials(body.username, body.password)
     if user is None:
-        auth.note_fail(key)
+        auth.note_fail(key, body.username)
         # 不区分「用户名不对」「口令不对」「账号被停用」：分开说等于告诉对方蒙对了哪一半
         raise HTTPException(401, '用户名或密码不对')
 
@@ -124,11 +124,18 @@ def _fail(message: str) -> RedirectResponse:
 
 
 @router.get('/auth/oidc/login')
-def oidc_login(request: Request, next: str = '/'):
+def oidc_login(request: Request, next: str = '/', link: bool = False):
+    """`link=1`：已经登着的人把 IdP 账号绑到自己身上（「账号」里那个按钮），不是登录。"""
     if not config.OIDC_ENABLED:
         raise HTTPException(404, '没有配置单点登录')
+    link_id = 0
+    if link:
+        me = auth.current_user(request)
+        if me is None:
+            return _fail('绑定单点登录要先登录门户')
+        link_id = int(me['id'])
     try:
-        url, packed = oidc.begin(_redirect_uri(request), _safe_next(next))
+        url, packed = oidc.begin(_redirect_uri(request), _safe_next(next), link_id)
     except oidc.OidcError as exc:
         return _fail(str(exc))
 
@@ -164,6 +171,11 @@ def oidc_callback(request: Request, code: str = '', state: str = '',
             raise oidc.OidcError('state 对不上，这次登录被丢弃')
         tokens = oidc.exchange(code, saved)
         claims = oidc.claims(tokens, saved)
+        if saved.get('link'):
+            _link(request, int(saved['link']), claims)
+            resp = RedirectResponse(_safe_next(saved.get('next', '/')), status_code=303)
+            resp.delete_cookie(oidc.STATE_COOKIE, path='/api/auth/oidc')
+            return resp
         user = _resolve(claims)
     except oidc.OidcError as exc:
         return _fail(str(exc))
@@ -176,6 +188,23 @@ def oidc_callback(request: Request, code: str = '', state: str = '',
     return resp
 
 
+def _link(request: Request, link_id: int, claims: dict) -> None:
+    """「账号」里点「绑定单点登录」回来：把这个 sub 绑到**现在登着的**这个人身上。
+
+    要求发起时和回来时是同一个人（state 里记着 id，Cookie 里的会话再对一次），
+    这个 sub 也不能已经绑在别人身上——不然就是拿自己的 IdP 账号去顶掉别人的绑定。
+    """
+    me = auth.current_user(request)
+    if me is None or int(me['id']) != link_id:
+        raise oidc.OidcError('绑定时门户登录状态变了，请重新登录后再绑定')
+    subject = str(claims.get('sub'))
+    owner = users.by_identity(oidc.PROVIDER, subject)
+    if owner is not None and int(owner['id']) != link_id:
+        raise oidc.OidcError(f'这个单点登录账号已经绑在门户用户 {owner["username"]} 上了')
+    users.link_identity(link_id, oidc.PROVIDER, subject, str(claims.get('email') or ''))
+    print(f'[OIDC] {me["username"]} 绑定了单点登录（sub={subject}）')
+
+
 def _resolve(claims: dict) -> dict:
     """claims → 门户里的那个用户。找不到就按配置决定建号还是拒绝。
 
@@ -186,9 +215,12 @@ def _resolve(claims: dict) -> dict:
     user = users.by_identity(oidc.PROVIDER, subject)
 
     if user is None:
-        username = oidc.pick_username(claims)
+        username, source = oidc.pick_username_claim(claims)
         if not username:
             raise oidc.OidcError('IdP 没给出可以当用户名的 claim')
+        if source == 'email' and claims.get('email_verified') is not True:
+            # 没验证过的邮箱谁都能填，拿它当用户名就等于让人自己挑一个门户账号名
+            raise oidc.OidcError('IdP 给的邮箱没有验证过（email_verified 不是 true），不能拿它建号')
         try:
             username = users.normalize_username(username)
         except ValueError as exc:
@@ -196,9 +228,14 @@ def _resolve(claims: dict) -> dict:
 
         existing = users.by_username(username)
         if existing is not None:
-            # 同名的本地账号：认领它，以后这个人两条路都能登。
-            # **这一步信任的是「管理员配了这个 IdP」**——换个 IdP 就等于换一批人，
-            # 所以 conf.json 里那几项只有能改文件的人才动得了
+            # 同名的本地账号。**只认领管理员预先建好的「纯单点登录」占位账号**
+            # （没有本地口令、还没绑过任何 IdP 账号）。以前是见同名就认领：IdP 允许自助注册
+            # 或自己改用户名时，注册一个叫 admin 的号就成了门户的 admin。
+            # 有口令的账号要绑定，由本人登录门户后在「账号」里点「绑定单点登录」
+            if existing.get('password_hash') is not None or users.identities(int(existing['id'])):
+                raise oidc.OidcError(
+                    f'门户里已经有一个叫 {username} 的账号。如果那是你，请先用账号口令登录门户，'
+                    '在右上角「账号」里点「绑定单点登录」；否则请联系管理员')
             user = existing
         elif config.OIDC_AUTO_CREATE:
             # password=None 而不是空串：这个人没有本地口令，本地登录那条路对他关着

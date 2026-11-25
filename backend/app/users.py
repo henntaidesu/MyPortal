@@ -293,14 +293,46 @@ def ensure_bootstrap() -> Optional[dict]:
         return None
     if not (config.BOOTSTRAP_USERNAME and config.BOOTSTRAP_PASSWORD):
         return None
+    password = config.BOOTSTRAP_PASSWORD
+    generated = config.uses_default_password()
+    if generated:
+        # conf.json 里还是自动生成的那对 admin/admin：不拿它建号。门户默认监听 0.0.0.0，
+        # 以前这一步之后到有人改口令之前，同一网络里谁都能用 admin/admin 登进来当管理员。
+        # 换成一串随机口令，打在运行窗口里，也写进 exe 旁边一个文件（改完口令把它删掉）
+        password = secrets.token_urlsafe(12)
     try:
-        row = create(config.BOOTSTRAP_USERNAME, config.BOOTSTRAP_PASSWORD,
+        row = create(config.BOOTSTRAP_USERNAME, password,
                      role='admin', display_name=config.BOOTSTRAP_USERNAME)
     except ValueError as exc:
         print(f'[用户] 建第一个管理员失败: {exc}')
         return None
-    print(f'[用户] 库里没有用户，已按 conf.json 建了管理员 {row["username"]}')
+    if generated:
+        note = config.BASE_DIR / INITIAL_PASSWORD_FILE
+        try:
+            note.write_text(f'用户名: {row["username"]}\n口令: {password}\n\n'
+                            '登录后在右上角「账号」里改掉口令，然后删掉这个文件。\n',
+                            encoding='utf-8')
+            where = f'，也写在了 {note}'
+        except OSError:
+            where = ''
+        print(f'[用户] !! 已建第一个管理员 {row["username"]}，初始口令是随机生成的：{password}{where}')
+    else:
+        print(f'[用户] 库里没有用户，已按 conf.json 建了管理员 {row["username"]}')
     return row
+
+
+INITIAL_PASSWORD_FILE = 'initial-admin-password.txt'
+
+
+def default_password_in_use() -> bool:
+    """库里还有没有一个启用中的管理员用着 admin/admin。启动时据此警告（app/main.py）。
+
+    看的是**库里的口令哈希**，不是 conf.json：老版本建出来的 admin/admin 改没改过，
+    只有库知道；conf.json 里那一段改没改跟它没关系。
+    """
+    row = by_username(config.DEFAULT_USERNAME)
+    return bool(row and row['is_active'] and row['role'] == 'admin'
+                and check_password(row.get('password_hash'), config.DEFAULT_PASSWORD))
 
 
 def describe() -> str:

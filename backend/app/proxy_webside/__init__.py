@@ -22,7 +22,8 @@
     NAME         str          日志里显示的名字
     DOMAINS      tuple[str]   认领哪些卡片（域名后缀，子域算数）
     HOSTS        tuple[str]   这个站还要一起代理的域名后缀
-    BROWSER_JS   str          追加到注入脚本末尾的 JS（能用 window.__portal）
+    BROWSER_JS   str          追加到注入脚本末尾的 JS（能用 window.__portal；
+                              React Router 的 SPA 路由对不上时调 window.__portal.routerView()）
     REWRITE_JS   bool         默认 True；False = 不改这个站 JS/JSON 里的地址（见下）
     on_request(ctx, headers)   就地改发给上游的首部（list[tuple[str, str]]）
     on_response(ctx, headers)  就地改带回浏览器的首部（list[tuple[bytes, bytes]]）
@@ -46,8 +47,9 @@
   上游一对不上就 401，表现成「页面壳子出来了，内容全是空的」。
 
 所以：**站点自己拿地址做文章的（签名、鉴权、SDK 里写死的 origin 比对），把这项关掉。**
-代价是 `location.href = 'https://…'` 这种钩子拦不住的跳转会直接走出代理
-（`Location` 的属性是 unforgeable，脚本改不了）——关之前先点几下确认没有这种写法。
+代价是 `location.href = 'https://…'` 这种跳转只剩注入脚本里 navigate 事件那一道拦
+（`Location` 的属性是 unforgeable，包不了），没有 Navigation API 的浏览器会直接走出代理——
+关之前先点几下。メルカリ 的「ログイン」就是 `location.assign('https://auth.mercari.com/…')`。
 
 **被认领的卡片会自动按整站模式办**（见 app/proxy.py 的 `_to_target`）：这里躺着的
 本来就是「直接转发必坏」的那几个站，认出来了还按直接转发办没有意义。

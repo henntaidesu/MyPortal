@@ -10,7 +10,7 @@
 """
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 
 from .. import auth, users
@@ -55,7 +55,7 @@ def update_profile(body: ProfileIn, user: dict = Depends(require_login)):
 
 
 @router.put('/password')
-def change_password(body: PasswordIn, response: Response,
+def change_password(body: PasswordIn, request: Request, response: Response,
                     user: dict = Depends(require_login)):
     row = users.by_id(int(user['id']))
     if row is None:
@@ -63,7 +63,13 @@ def change_password(body: PasswordIn, response: Response,
     if row.get('password_hash') is None:
         raise HTTPException(400, '这个账号没有本地密码，只能走单点登录；'
                                  '要加一个请找管理员')
+    # 旧口令也挂登录那套限流：偷到会话 Cookie 的人不该能在这儿无限试旧口令
+    key = auth.client_ip(request)
+    wait = auth.login_blocked(key, row['username'])
+    if wait:
+        raise HTTPException(429, f'失败次数太多，请 {wait} 秒后再试')
     if not users.check_password(row['password_hash'], body.old_password):
+        auth.note_fail(key, row['username'])
         raise HTTPException(400, '旧密码不对')
     try:
         users.set_password(int(user['id']), body.new_password)

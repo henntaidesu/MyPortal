@@ -39,12 +39,14 @@ npm run dev                       # http://localhost:9920
 
 前端的 `/api` 会代理到 9921，浏览器看到的是同源，不用配 CORS。
 
-第一个管理员按 `conf.json` 的 `auth.bootstrap_admin` 建，默认 **`admin` / `admin`**，
-**只在库里一个用户都没有时才建**。
+第一个管理员按 `conf.json` 的 `auth.bootstrap_admin` 建，**只在库里一个用户都没有时才建**。
+那一段还是自动生成的 `admin` / `admin` 时，**口令不用 `admin`，而是随机生成一串**，
+打在运行窗口 / 启动日志里，同时写进 `conf.json` 旁边的 `initial-admin-password.txt`。
+想自己指定就在首次启动前把 `bootstrap_admin.password` 改掉。
 
-> **登录后马上改口令**：右上角菜单 → 账号 → 改口令。改完之后可以把
-> `conf.json` 里的 `bootstrap_admin` 整段删掉。
-> 只要那一段还是 `admin` / `admin`，后端每次启动都会在日志里警告一句。
+> **登录后马上改口令**：右上角菜单 → 账号 → 改口令，然后删掉 `initial-admin-password.txt`，
+> 也可以把 `conf.json` 里的 `bootstrap_admin` 整段删掉。
+> 老版本建出来的 `admin` 还用着口令 `admin` 的话，后端每次启动都会在日志里警告一句。
 
 ## 用法
 

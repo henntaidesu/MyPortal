@@ -33,8 +33,9 @@
 - **运行时拼出来的地址**：`fetch(base + '/x')`。字面量那半截会被改写掉，
   所以拼出来的多半还是对的；真拼不出来的由注入浏览器的那段脚本在运行时兜
   （app/proxyhook.py）。
-- **`location.href = '...'` 这类赋值**：`Location` 的属性是 unforgeable，脚本拦不住。
-  字面量改写能覆盖大半。
+- **`location.href = '...'` 这类赋值**：`Location` 的属性是 unforgeable，包不了。
+  注入的脚本从 Navigation API 的 navigate 事件拦（app/proxyhook.py），
+  没有这个 API 的浏览器靠字面量改写覆盖大半。
 - **Worker / iframe srcdoc 里的根绝对地址**：注入的脚本进不去 Worker。
 - **reCAPTCHA 之类按域名发牌的第三方**：域名对不上，代理与否都过不了。
 """

@@ -8,7 +8,7 @@
  */
 import { ref, reactive, onMounted, onBeforeUnmount } from 'vue'
 import { api, ApiError } from '../api'
-import { auth } from '../auth'
+import { auth, oidcLink, loadProviders } from '../auth'
 import { askConfirm } from '../ask'
 
 const emit = defineEmits(['close'])
@@ -91,6 +91,7 @@ function onKey(e) {
 onMounted(() => {
   window.addEventListener('keydown', onKey)
   load()
+  loadProviders()      // 登着的时候 auth.js 不问这个，「绑定单点登录」要知道开没开
 })
 onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 </script>
@@ -108,6 +109,12 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
             · 已绑定 {{ account.identities.map(i => i.provider).join('、') }}
           </template>
         </div>
+      </div>
+
+      <!-- 单点登录开着、这个账号还没绑过时才画。同名的 IdP 账号不会再被自动认领，
+           有口令的人要用单点登录就得在这儿主动绑一次 -->
+      <div v-if="account && auth.providers.oidc?.enabled && !account.identities.length" class="foot">
+        <button class="btn" @click="oidcLink">绑定单点登录</button>
       </div>
 
       <label class="field">

@@ -21,7 +21,8 @@ ROOT = PORTAL + f'/api/proxy/{CARD}/__portal__/http/10.0.10.30:9600/'
 class ProxyIsolationTests(unittest.TestCase):
     def fetch(self, user_id, headers, upstream_headers=(), body=b'{}', login=0, jar=False):
         target = proxy._to_target({'id': CARD, 'url': 'http://10.0.10.30:9600', 'proxy': 'site'})
-        target = target._replace(login=login, jar=jar)
+        # 10.0.10.30 是内网地址：按管理员的卡片（或管理员分享的）算
+        target = target._replace(login=login, jar=jar, private_ok=True)
         seen = []
 
         async def upstream(request):

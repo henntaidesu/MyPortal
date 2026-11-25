@@ -22,6 +22,7 @@ conf.json 里填一串随机数多半会被填成 `secret`，而多实例部署�
 才看得到这个延迟。**别把它调长**：这是权限撤销的生效上限。
 
 登录失败限流是进程内内存：多 worker 起 uvicorn 会让它失效，目前设计就是单进程。
+按两样计数：来源 IP（`client_ip`，**不自己读 X-Forwarded-For**，见那里）和用户名。
 """
 import hmac
 import hashlib
@@ -83,15 +84,24 @@ def _lookup(user_id: int) -> Optional[dict]:
 # ---------------------------------------------------------------- 限流
 _MAX_FAILS = 10
 _WINDOW = 300                  # 5 分钟内失败 10 次就先歇着
+# 同一个用户名不管从哪儿来，5 分钟内失败这么多次也先歇着：换 IP 爆破一个账号的那条路。
+# 比按 IP 的宽一些——它也能被别人拿来把这个账号锁住 5 分钟，代价只是等一会儿
+_MAX_FAILS_USER = 20
+# 计数表最多记这么多个键，满了先扔掉过期的，还满就整张清掉（别让人刷爆内存）
+_MAX_KEYS = 10000
 
 _fails: dict[str, list[float]] = {}
 _fails_lock = threading.Lock()
 
 
-def client_ip(request: Request) -> str:
-    forwarded = request.headers.get('x-forwarded-for', '')
-    if forwarded:
-        return forwarded.split(',')[0].strip()
+def client_ip(request) -> str:
+    """来访者的 IP。**只看 uvicorn 给的 `request.client`**。
+
+    以前是直接取 X-Forwarded-For 的第一段：那个头谁都能填，每次换一个值，
+    登录限流就不存在了。现在由 uvicorn 的 proxy_headers 处理——只有 conf.json
+    `server.forwarded_allow_ips` 里那几个地址（默认只有本机的反代）发来的 X-Forwarded-For
+    才会被采信并换进 `request.client`。
+    """
     return request.client.host if request.client else ''
 
 
@@ -99,24 +109,45 @@ def _recent(key: str, now: float) -> list[float]:
     return [t for t in _fails.get(key, []) if now - t < _WINDOW]
 
 
-def login_blocked(key: str) -> int:
-    """返回还要等几秒；0 表示可以试。"""
-    now = time.time()
-    with _fails_lock:
-        hits = _recent(key, now)
-        _fails[key] = hits
-        if len(hits) < _MAX_FAILS:
-            return 0
-        return max(1, int(_WINDOW - (now - hits[0])))
+def _user_key(username: str) -> str:
+    return 'user:' + (username or '').strip().lower()
 
 
-def note_fail(key: str) -> None:
+def login_blocked(key: str, username: Optional[str] = None) -> int:
+    """返回还要等几秒；0 表示可以试。`key` 是来源 IP，`username` 给了就一起查。"""
+    now = time.time()
+    checks = [(key, _MAX_FAILS)]
+    if username is not None:
+        checks.append((_user_key(username), _MAX_FAILS_USER))
+    wait = 0
+    with _fails_lock:
+        for one, limit in checks:
+            hits = _recent(one, now)
+            if hits:
+                _fails[one] = hits
+            else:
+                _fails.pop(one, None)
+            if len(hits) >= limit:
+                # 再等到窗口里最早那几次过期、失败次数掉回上限以下
+                wait = max(wait, max(1, int(_WINDOW - (now - hits[-limit]))))
+    return wait
+
+
+def note_fail(key: str, username: Optional[str] = None) -> None:
     now = time.time()
     with _fails_lock:
-        _fails[key] = _recent(key, now) + [now]
+        if len(_fails) >= _MAX_KEYS:
+            for stale in [k for k in _fails if not _recent(k, now)]:
+                _fails.pop(stale, None)
+            if len(_fails) >= _MAX_KEYS:
+                _fails.clear()
+        for one in [key] + ([_user_key(username)] if username is not None else []):
+            _fails[one] = _recent(one, now) + [now]
 
 
 def clear_fails(key: str) -> None:
+    """登录成功后清掉这个 IP 的计数。用户名那份不清：攻击者自己登录成功一次
+    不该替别人把爆破计数归零——它 5 分钟后自己过期。"""
     with _fails_lock:
         _fails.pop(key, None)
 

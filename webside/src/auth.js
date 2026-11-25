@@ -79,6 +79,13 @@ export function oidcLogin() {
   location.href = '/api/auth/oidc/login?next=' + encodeURIComponent(next || '/')
 }
 
+/** 「账号」里的「绑定单点登录」：已经登着的人去 IdP 走一趟，回来把那个 IdP 账号绑到自己身上。
+ *  后端不再按同名自动认领有口令的账号（见 app/routers/auth.py 的 _resolve），要绑就走这里 */
+export function oidcLink() {
+  const next = location.pathname + location.search + location.hash
+  location.href = '/api/auth/oidc/login?link=1&next=' + encodeURIComponent(next || '/')
+}
+
 /* 会话过期时（后端回 401）把人退回登录页，别让他对着一个存不上的面板接着改。
    注册在这里而不是 App.vue：store.js 里的自动保存也会撞上 401 */
 setUnauthorizedHandler(() => {

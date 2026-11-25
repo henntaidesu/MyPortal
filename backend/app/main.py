@@ -19,7 +19,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import diagnostics, cookiejar, db, iconcache, idp, navstore, oidc, proxy, users
-from .config import BASE_DIR, CONF_PATH, DIST_DIR, HOST, PORT, uses_default_password
+from .config import BASE_DIR, CONF_PATH, DIST_DIR, FORWARDED_ALLOW_IPS, HOST, PORT
 from .icon import router as icon_router
 from .proxy import router as proxy_router
 from .routers.account import router as account_router
@@ -71,10 +71,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # 一个用户都没有 = 谁都登不进来。不停下来是故意的：停了就连改配置的机会都没有
         print(f'[portal] !! 库里一个用户都没有，现在谁都登不进来。'
               f'在 {CONF_PATH} 的 auth.bootstrap_admin 里填一对用户名口令再重启')
-    elif uses_default_password():
+    elif users.default_password_in_use():
         # 故意每次启动都喊。谁能打开这个门户，谁就能改掉所有人的账号
-        print(f'[portal] !! conf.json 里第一个管理员还配着默认口令 admin/admin，'
-              f'登进去之后在「账号」里改掉，然后把 {CONF_PATH} 的 bootstrap_admin 删了')
+        print(f'[portal] !! 管理员 admin 的口令还是 admin，同一网络里谁都能登进来当管理员。'
+              f'马上登进去在「账号」里改掉')
 
     task = asyncio.create_task(_purge_loop())
     try:
@@ -136,7 +136,10 @@ def main() -> None:
     # 都是进程内的内存，多 worker 会让它们各说各话。真要横着扩，前面放反代、
     # 后面起多个进程也能跑（会话是签名 Cookie，密钥在库里，共享得了），
     # 只是限流会被摊薄、缓存会多 5 秒延迟。
+    # proxy_headers：只有 forwarded_allow_ips 里那几个地址发来的 X-Forwarded-For 才会被
+    # uvicorn 换进 request.client——app/auth.py 的 client_ip 只认这个，不自己读请求头
     config = uvicorn.Config(app, host=HOST, port=PORT, log_level='info',
+                            proxy_headers=True, forwarded_allow_ips=FORWARDED_ALLOW_IPS,
                             timeout_graceful_shutdown=5)
     server = uvicorn.Server(config)
     # 打包成 exe 且在 Windows 上时挂托盘图标和运行窗口，其余情况整段是 no-op；

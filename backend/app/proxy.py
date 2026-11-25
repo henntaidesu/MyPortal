@@ -267,6 +267,9 @@ class Target(NamedTuple):
     # 这张卡片上用谁的登录态（门户用户 id）：自己的卡片和普通分享是本人，
     # 共享登录的分享是分享人。由 `_targets` 填，0 = 没填，按当前用户算（见 `_login_of`）
     login: int = 0
+    # 能不能转到内网 / 本机地址。管理员自己的卡片、管理员分享出来的卡片才行（`_targets` 填）；
+    # 普通用户自己加的卡片只许公网——不然任何一个账号都能拿门户当跳板进内网（见 `_check_address`）
+    private_ok: bool = False
 
     @property
     def mount(self) -> str:
@@ -284,8 +287,11 @@ _CACHE_TTL = 5.0
 _cache: dict[int, tuple[float, tuple[int, int], dict[str, Target]]] = {}
 
 
-def _targets(user_id: int) -> dict[str, Target]:
+def _targets(user_id: int, admin: bool = False) -> dict[str, Target]:
     """(这个人的) 卡片 id → 目标，只收「门户代理」打开了的那些。
+
+    `admin` 决定他**自己**的卡片能不能转内网（`Target.private_ok`）；分享过来的卡片
+    一定是管理员的（navstore.shared 只认启用中的管理员），所以总是可以。
 
     打开一个被代理的页面能连着打出几十个子资源请求，每个都重查一遍库太费，
     所以压一层缓存。失效有两道：
@@ -298,7 +304,8 @@ def _targets(user_id: int) -> dict[str, Target]:
     """
     now = time.monotonic()
     # 分享过来的卡片在别人名下，它们的改动看全局那个计数
-    rev = (navstore.revision(user_id), navstore.shared_revision())
+    # 角色也进失效条件：降级之后，他自己那些卡片当场不能再转内网
+    rev = (navstore.revision(user_id), navstore.shared_revision(), admin)
     hit = _cache.get(user_id)
     if hit and hit[0] > now and hit[1] == rev:
         return hit[2]
@@ -307,7 +314,7 @@ def _targets(user_id: int) -> dict[str, Target]:
     for item in navstore.cards(user_id):
         target = _to_target(item)
         if target:
-            table[target.item_id] = target._replace(login=user_id)
+            table[target.item_id] = target._replace(login=user_id, private_ok=admin)
     # 管理员分享给这个人的卡片（navstore.shared）。归属校验的意思变成
     # 「是你的卡片，或者分享给了你」，仍然只查这个人自己的那份名单。
     # 卡片的配置照管理员那张走，但罐子用的是 user_id 这个人自己的（_cookie_out / _save_cookies）：
@@ -317,7 +324,7 @@ def _targets(user_id: int) -> dict[str, Target]:
         target = _to_target(item)
         if target:
             login = int(item['ownerId']) if item.get('shareLogin') else user_id
-            table.setdefault(target.item_id, target._replace(login=login))
+            table.setdefault(target.item_id, target._replace(login=login, private_ok=True))
 
     _cache[user_id] = (now + _CACHE_TTL, rev, table)
     return table
@@ -352,13 +359,17 @@ def _login_of(target: Target, user_id: int) -> int:
     return target.login or user_id
 
 
-def _target(user_id: int, item_id: str) -> Target:
+def _is_admin(user: dict) -> bool:
+    return (user.get('role') or 'user') == 'admin'
+
+
+def _target(user: dict, item_id: str) -> Target:
     """**归属校验就是这一句**：查的是「这个人的」那张表，不是全局表。
 
     写成「查出来再比一比 user_id」的话，哪天多一条取卡片的路就漏一次，
     而漏一次的后果是：拿到别人的卡片 id 就能借门户往那台机器上打。
     """
-    target = _targets(user_id).get(item_id)
+    target = _targets(int(user['id']), _is_admin(user)).get(item_id)
     if not target:
         # 不区分「这张卡片不是你的」「存在但没开代理」「压根没这张卡片」：
         # 分开说等于让人拿一串 id 去探别人的导航里有什么
@@ -391,16 +402,83 @@ def _rewriter(target: Target, foreign: str = '', portal_origin: str = '',
 # 都去解析一次 DNS。60 秒：DNS 记录变了，最多一分钟后跟上
 _PUBLIC_TTL = 60.0
 _public_cache: dict[str, tuple[float, bool]] = {}
+_addr_cache: dict[str, tuple[float, tuple[str, ...]]] = {}
 
 
-def _ip_public(text: str) -> bool:
+def _ip(text: str):
     try:
         ip = ipaddress.ip_address(text.split('%', 1)[0])
     except ValueError:
-        return False
+        return None
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
         ip = ip.ipv4_mapped                            # ::ffff:10.0.0.1 这种绕法
-    return ip.is_global and not ip.is_multicast
+    return ip
+
+
+def _ip_public(text: str) -> bool:
+    ip = _ip(text)
+    return ip is not None and ip.is_global and not ip.is_multicast
+
+
+def _ip_forbidden(text: str) -> bool:
+    """**谁的卡片都不许转**的地址：链路本地（169.254.169.254 云元数据就在这儿）、
+    0.0.0.0 / ::、组播。管理员要转内网可以，但这几类不是「内网里的一台机器」。"""
+    ip = _ip(text)
+    return ip is None or ip.is_link_local or ip.is_unspecified or ip.is_multicast
+
+
+def _bare_host(host: str) -> str:
+    name = host.lower()
+    if name.startswith('['):
+        return name[1:].split(']', 1)[0]
+    return name.rsplit(':', 1)[0] if name.count(':') == 1 else name
+
+
+async def _addresses(host: str) -> Optional[tuple[str, ...]]:
+    """主机解析出来的全部地址（本身是 IP 就是它自己）。解析不了返回 None。缓存 60 秒。"""
+    name = _bare_host(host)
+    if not name:
+        return None
+    if _ip(name) is not None:
+        return (name,)
+    now = time.monotonic()
+    hit = _addr_cache.get(name)
+    if hit and hit[0] > now:
+        return hit[1]
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(name, None)
+    except OSError:
+        return None
+    addrs = tuple(sorted({info[4][0] for info in infos}))
+    if len(_addr_cache) > 4096:
+        _addr_cache.clear()
+    _addr_cache[name] = (now + _PUBLIC_TTL, addrs)
+    return addrs
+
+
+async def _check_address(target: Target, host: str) -> None:
+    """不在「白名单之外」那条路上的请求也要过的一道：这张卡片能不能连这台主机。
+
+    - 链路本地 / 未指定 / 组播：谁都不行（`_ip_forbidden`）；
+    - 内网、本机：只有 `target.private_ok` 的卡片行（管理员的、管理员分享的）。
+      普通用户的卡片只许公网，单标签名字（`nas`）一律当内网。
+
+    以前这里什么都不查，任何一个账号给自己加一张 `http://169.254.169.254/` 的卡片、
+    打开门户代理，门户就替他把云元数据端点读回来了。和 `_public` 一样挡不住 DNS rebinding。
+    """
+    if not target.private_ok and '.' not in _bare_host(host) and _ip(_bare_host(host)) is None:
+        raise HTTPException(403, f'这张卡片不转 {host}：只有管理员的卡片能经门户访问内网地址')
+    addrs = await _addresses(host)
+    if addrs is None:
+        if target.private_ok:
+            return                     # 解析不了就交给 httpx 自己报 502，管理员的内网名字常见这样
+        raise HTTPException(502, f'门户解析不了 {host}')
+    if not addrs or any(_ip_forbidden(a) for a in addrs):
+        raise HTTPException(403, f'门户代理不转 {host}（链路本地 / 保留地址）')
+    if target.private_ok:
+        return
+    if not all(_ip_public(a) for a in addrs):
+        raise HTTPException(403, f'这张卡片不转 {host}：只有管理员的卡片能经门户访问内网地址')
 
 
 async def _public(host: str) -> Optional[bool]:
@@ -452,6 +530,36 @@ async def _check_foreign(host: str) -> None:
     if not ok:
         # 白名单之外只转公网。放宽了，被代理页面里的一段脚本就能借门户去连内网任意一台机器
         raise HTTPException(403, f'这张卡片不转 {host}（不在它的域名白名单里，也不是公网地址）')
+
+
+def _entry_ok(headers, target: Target, host: str) -> bool:
+    """这次请求能不能落到 `host` 上：卡片自己那台机器随便进，别的主机只能从**门户自己的页面里**进。
+
+    为什么要这一道：被代理的页面和门户同源。不拦的话，任何人发一条
+    `/api/proxy/<卡片>/__portal__/https/坏站/x.html` 给登着门户的人（管理员），点开就是
+    坏站的 HTML 跑在门户的源下，带着他的会话去调 `/api/users`——`Fallback` 靠的 Referer
+    一句 `referrerPolicy: 'no-referrer'` 就绕开了。所以白名单里的兄弟域名（`xxx.github.io`
+    这种注册域放进来的，内容未必是卡片主人的）和白名单之外的外站，都只认：
+
+      - `Sec-Fetch-Site: same-origin`（从被代理的页面里点出去 / 加载 / 跳转过去，
+        经过的跳转全在门户源下）或 `none`（自己在地址栏敲的、书签）；
+      - 老浏览器没有 Sec-Fetch-*：Referer 得是同一张卡片代理底下的页面。
+
+    跨站链过来的（cross-site / same-site）、什么都没带的，一律不认。卡片自己那台机器不受影响：
+    那是卡片主人自己选的站，从聊天软件里点一条深链接进去是正常用法。
+
+    **这只是把门槛从「一条链接」抬到「得先让人在代理里点到坏站」**：页面里的第三方脚本、
+    从正常页面点出去的外站，仍然和门户同源。根治要把代理放到另一个源上，见 CLAUDE.md。
+    """
+    if host.lower() == target.host.lower():
+        return True
+    site = (headers.get('sec-fetch-site') or '').lower()
+    if site:
+        return site in ('same-origin', 'none')
+    referer = urlsplit(headers.get('referer') or '')
+    here = (headers.get('host') or '').lower()
+    return bool(referer.path.startswith(target.mount)
+                and (not referer.netloc or referer.netloc.lower() == here))
 
 
 # ---------------------------------------------------------------- 地址
@@ -848,7 +956,8 @@ def _rewrite_location(value: str, target: Target, scheme: str, host: str,
 
 def _response_headers(resp: httpx.Response, target: Target, scheme: str, host: str,
                       rewriter: Optional[Rewriter], decoded: bool,
-                      cookies: list[tuple[bytes, bytes]] = ()) -> list[tuple[bytes, bytes]]:
+                      cookies: list[tuple[bytes, bytes]] = (),
+                      drop_cookies: bool = False) -> list[tuple[bytes, bytes]]:
     """原样带回，除了逐跳首部、那几个讲源站规矩的（`_STRIP`）、Set-Cookie 和 Location。
 
     走 `resp.headers.raw` 而不是 `.items()`：Set-Cookie 一次可能有好几条，
@@ -867,6 +976,8 @@ def _response_headers(resp: httpx.Response, target: Target, scheme: str, host: s
             continue
         value = raw_value.decode('latin-1')
         if low == 'set-cookie':
+            if drop_cookies:
+                continue                       # 外站种的不收，见 forward 里 foreign 那段
             value = _rewrite_cookie(value, target.mount)
         elif low == 'location':
             original = value
@@ -936,7 +1047,7 @@ def enter(item_id: str, user: dict = Depends(require_login)):
     一遍 URL 没必要，而且卡片地址改了之后前端那份不会还记着老路径。
     307 不是 302：万一是带着方法过来的，方法别被改成 GET。
     """
-    target = _target(int(user['id']), item_id)
+    target = _target(user, item_id)
     parts = urlsplit(target.url)
     tail = parts.path.lstrip('/')
     if parts.query:
@@ -950,14 +1061,25 @@ async def forward(item_id: str, path: str, request: Request,
                   user: dict = Depends(require_login)):
     diagnostics.event('proxy.resolve', card=item_id)
     user_id = int(user['id'])
-    target = _target(user_id, item_id)
+    target = _target(user, item_id)
     scheme, host, rest, foreign = _upstream(target, request.scope)
+    if not _entry_ok(request.headers, target, host):
+        raise HTTPException(403, f'{host} 只能从这张卡片打开的页面里进去，不能从别处直接链过来')
     if foreign:
         await _check_foreign(host)
+    else:
+        await _check_address(target, host)
     login = _login_of(target, user_id)
     rewriter = (_rewriter(target, host if foreign else '', _origin_of(str(request.url)), login)
                 if target.site else None)
-    owned, browser_cookies = _cookie_owner('; '.join(request.headers.getlist('cookie')), login)
+    if foreign:
+        # 白名单之外的外站：这张卡片底下浏览器里那些 Cookie（上游站点的登录态）一条都不给它，
+        # 罐子也不用，它种的也不收。以前是整份转过去的——在メルカリ 里点一个外链，
+        # メルカリ 的会话 Cookie 就到了那个外站的服务器上
+        target = target._replace(jar=False)
+        owned, browser_cookies = False, []
+    else:
+        owned, browser_cookies = _cookie_owner('; '.join(request.headers.getlist('cookie')), login)
 
     url = f'{scheme}://{host}/{rest}'
     up_path = '/' + rest.split('?', 1)[0]
@@ -994,11 +1116,13 @@ async def forward(item_id: str, path: str, request: Request,
     # 存罐子挂在这一句：底下有「改写后整份发」和「流式转」两条出路，
     # 挂在这儿两条都覆盖得到，挂到 _response_headers 里则会被调用两次
     _save_cookies(resp, target, user_id, host, up_path)
-    cookies = _owner_cookies(target, login, owned, browser_cookies, 'set-cookie' in resp.headers)
+    cookies = ([] if foreign else
+               _owner_cookies(target, login, owned, browser_cookies, 'set-cookie' in resp.headers))
 
     if rewriter is not None and request.method != 'HEAD' and resp.status_code not in (204, 304):
         try:
-            rewritten = await _rewritten(resp, target, ctx, rewriter, scheme, host, cookies)
+            rewritten = await _rewritten(resp, target, ctx, rewriter, scheme, host, cookies,
+                                         drop_cookies=foreign)
         except httpx.HTTPError as exc:
             # 正文读到一半断了、或者压缩数据解不开。响应头还没发，回一个干净的 502，
             # 别让它变成一屏 500 的 traceback
@@ -1019,7 +1143,8 @@ async def forward(item_id: str, path: str, request: Request,
     response = StreamingResponse(resp.aiter_bytes() if decode else resp.aiter_raw(),
                                  status_code=resp.status_code,
                                  background=BackgroundTask(resp.aclose))
-    response.raw_headers = _response_headers(resp, target, scheme, host, rewriter, decode, cookies)
+    response.raw_headers = _response_headers(resp, target, scheme, host, rewriter, decode, cookies,
+                                             drop_cookies=foreign)
     return response
 
 
@@ -1043,7 +1168,8 @@ async def _read_capped(resp: httpx.Response):
 
 async def _rewritten(resp: httpx.Response, target: Target, ctx: webside.Ctx,
                      rewriter: Rewriter, scheme: str, host: str,
-                     cookies: list[tuple[bytes, bytes]] = ()) -> Optional[Response]:
+                     cookies: list[tuple[bytes, bytes]] = (),
+                     drop_cookies: bool = False) -> Optional[Response]:
     """要改写就把整份读进来改完再发；不用改的返回 None，由调用方照常流式转。
 
     改写必然要整份读进内存（HTML 里那些地址不按块对齐），所以只对 HTML/CSS/JS/JSON
@@ -1067,7 +1193,8 @@ async def _rewritten(resp: httpx.Response, target: Target, ctx: webside.Ctx,
                 yield chunk
         big = StreamingResponse(chained(), status_code=resp.status_code,
                                 background=BackgroundTask(resp.aclose))
-        big.raw_headers = _response_headers(resp, target, scheme, host, rewriter, True, cookies)
+        big.raw_headers = _response_headers(resp, target, scheme, host, rewriter, True, cookies,
+                                            drop_cookies=drop_cookies)
         return big
 
     await resp.aclose()
@@ -1082,7 +1209,8 @@ async def _rewritten(resp: httpx.Response, target: Target, ctx: webside.Ctx,
         except (UnicodeError, LookupError) as exc:
             print(f'[代理] {host} 的这份 {kind} 改写不了，按原样发回: {exc}')
 
-    headers = _response_headers(resp, target, scheme, host, rewriter, True, cookies)
+    headers = _response_headers(resp, target, scheme, host, rewriter, True, cookies,
+                                drop_cookies=drop_cookies)
     if kind == 'html':
         headers = _no_store(headers)           # 里面注入了按人的脚本，见 _CACHE_HEADERS
     headers.append((b'content-length', str(len(body)).encode('latin-1')))
@@ -1137,17 +1265,23 @@ async def forward_ws(ws: WebSocket, item_id: str, path: str):
 
     ws_mod = _ws_module()
     # 和 HTTP 那条一样，查的是这个人自己的目标表
-    target = _targets(int(user['id'])).get(item_id)
+    target = _targets(int(user['id']), _is_admin(user)).get(item_id)
     if ws_mod is None or target is None:
         await ws.close(code=1011)
         return
+    # 跨站发起的握手不带 Lax 的会话 Cookie，上面那句就拦住了，这里不再比 Origin 和 Host：
+    # 反代没把 Host 原样转过来的部署上，两者本来就对不上
     try:
         scheme, host, rest, foreign = _upstream(target, ws.scope)
         if foreign:
             await _check_foreign(host)
+        else:
+            await _check_address(target, host)
     except HTTPException:
         await ws.close(code=1008)      # 主机名不在白名单里，也不是公网
         return
+    if foreign:
+        target = target._replace(jar=False)    # 外站不给 Cookie，见 forward
 
     url = f'{"wss" if scheme == "https" else "ws"}://{host}/{rest}'
     if ws.url.query:
@@ -1158,6 +1292,7 @@ async def forward_ws(ws: WebSocket, item_id: str, path: str):
     # 删和换标记由同一页面的 HTTP 请求去做
     owned, _ = _cookie_owner('; '.join(ws.headers.getlist('cookie')),
                              _login_of(target, int(user['id'])))
+    owned = owned and not foreign
     headers = []
     seen_cookie = False
     for name, value in ws.headers.items():

@@ -23,7 +23,7 @@ class EmptyStream(httpx.AsyncByteStream):
 
 class ProxySsoTests(unittest.TestCase):
     def test_login_keeps_public_callback_and_leaves_proxy_for_authorization(self):
-        target = proxy._to_target({'id': '6dk0sx3ezp', 'url': 'http://10.0.10.30:9600', 'proxy': 'site'})
+        target = proxy._to_target({'id': '6dk0sx3ezp', 'url': 'http://10.0.10.30:9600', 'proxy': 'site'})._replace(private_ok=True)
         seen = []
         async def upstream(request):
             seen.append(request)

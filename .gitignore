@@ -14,3 +14,13 @@ Releases/
 
 # 图标磁盘缓存（运行时自动生成，删了会自己重建）
 backend/icons/
+
+# 诊断日志（运行时生成，含卡片 id 和访问过的地址）
+backend/logs/
+logs/
+
+# 首次启动随机生成的管理员口令（改完口令就删）
+initial-admin-password.txt
+
+# 安全审计报告（含未修复问题的攻击细节，仓库是公开的，只留本地）
+docs/security-audit-*.md
